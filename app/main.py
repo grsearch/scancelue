@@ -230,6 +230,17 @@ class StrategyEngine:
         return strategy, Signal.HOLD, "down状态禁止新开仓"
 
 
+def format_token_age(created_at: datetime | None, now: datetime | None = None) -> str:
+    """Dashboard AGE should represent token creation age, not whitelist inclusion age."""
+    if created_at is None:
+        return "N/A"
+    now = now or datetime.now(timezone.utc)
+    age_h = (now - created_at).total_seconds() / 3600
+    if age_h < 0:
+        return "0.00h"
+    return f"{age_h:.2f}h"
+
+
 class MonitorService:
     def __init__(self) -> None:
         self.tokens: dict[str, TokenRecord] = {}
@@ -375,11 +386,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     now = datetime.now(timezone.utc)
     tokens = []
     for t in service.tokens.values():
-        age_h = ((now - (t.created_at or t.added_at)).total_seconds()) / 3600
         tokens.append(
             {
                 "symbol": t.symbol,
-                "age": f"{age_h:.2f}h",
+                "age": format_token_age(t.created_at, now),
                 "fdv": f"{(t.fdv or 0):,.0f}",
                 "address": t.address,
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",

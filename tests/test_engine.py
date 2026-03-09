@@ -1,4 +1,15 @@
-from app.main import MarketState, PositionState, Signal, StrategyEngine, TokenRecord, ema, rsi
+from datetime import datetime, timezone
+
+from app.main import (
+    MarketState,
+    PositionState,
+    Signal,
+    StrategyEngine,
+    TokenRecord,
+    ema,
+    format_token_age,
+    rsi,
+)
 
 
 def test_ema_and_rsi_shapes():
@@ -28,3 +39,10 @@ def test_sell_only_never_buy():
     assert sig != Signal.BUY
     assert sig != Signal.ADD
     assert strategy.value == "sell_only"
+
+
+def test_format_token_age_uses_created_time_only():
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    created = datetime(2026, 1, 1, 10, 30, tzinfo=timezone.utc)
+    assert format_token_age(created, now) == "1.50h"
+    assert format_token_age(None, now) == "N/A"
