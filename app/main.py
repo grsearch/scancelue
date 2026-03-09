@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
@@ -275,6 +277,95 @@ class MonitorService:
         self.gecko = GeckoClient()
         self.dispatcher = SignalDispatcher()
         self.lock = asyncio.Lock()
+        self.state_path = Path(os.getenv("STATE_FILE", "data/state.json"))
+
+    @staticmethod
+    def _dt_to_str(value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.astimezone(timezone.utc).isoformat()
+
+    def _token_to_dict(self, token: TokenRecord) -> dict[str, Any]:
+        return {
+            "network": token.network,
+            "address": token.address,
+            "symbol": token.symbol,
+            "added_at": self._dt_to_str(token.added_at),
+            "pool_created_at": self._dt_to_str(token.pool_created_at),
+            "fdv": token.fdv,
+            "price": token.price,
+            "confirmed_state": token.confirmed_state.value,
+            "candidate_state": token.candidate_state.value if token.candidate_state else None,
+            "candidate_count": token.candidate_count,
+            "position": {
+                "has_position": token.position.has_position,
+                "added_once": token.position.added_once,
+            },
+            "last_rsi": token.last_rsi,
+        }
+
+    def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
+        return {
+            "ts": self._dt_to_str(log.ts),
+            "symbol": log.symbol,
+            "address": log.address,
+            "strategy": log.strategy.value,
+            "signal": log.signal.value,
+            "reason": log.reason,
+        }
+
+    def _token_from_dict(self, payload: dict[str, Any]) -> TokenRecord:
+        return TokenRecord(
+            network=str(payload.get("network", "solana")),
+            address=str(payload["address"]),
+            symbol=str(payload.get("symbol", "")),
+            added_at=parse_cg_datetime(payload.get("added_at")) or datetime.now(timezone.utc),
+            pool_created_at=parse_cg_datetime(payload.get("pool_created_at")),
+            fdv=payload.get("fdv"),
+            price=payload.get("price"),
+            confirmed_state=MarketState(payload.get("confirmed_state", MarketState.RANGE.value)),
+            candidate_state=MarketState(payload["candidate_state"]) if payload.get("candidate_state") else None,
+            candidate_count=int(payload.get("candidate_count", 0)),
+            position=PositionState(
+                has_position=bool(payload.get("position", {}).get("has_position", False)),
+                added_once=bool(payload.get("position", {}).get("added_once", False)),
+            ),
+            last_rsi=payload.get("last_rsi"),
+        )
+
+    def save_state(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "tokens": [self._token_to_dict(t) for t in self.tokens.values()],
+            "blacklist": sorted(self.blacklist),
+            "logs": [self._log_to_dict(l) for l in self.logs[-500:]],
+        }
+        self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
+    def load_state(self) -> None:
+        if not self.state_path.exists():
+            return
+        payload = json.loads(self.state_path.read_text())
+        tokens: dict[str, TokenRecord] = {}
+        for item in payload.get("tokens", []):
+            token = self._token_from_dict(item)
+            tokens[token.address] = token
+        logs: list[SignalLog] = []
+        for item in payload.get("logs", []):
+            ts = parse_cg_datetime(item.get("ts")) or datetime.now(timezone.utc)
+            logs.append(
+                SignalLog(
+                    ts=ts,
+                    symbol=str(item.get("symbol", "")),
+                    address=str(item.get("address", "")),
+                    strategy=StrategyName(item.get("strategy", StrategyName.RSI.value)),
+                    signal=Signal(item.get("signal", Signal.HOLD.value)),
+                    reason=str(item.get("reason", "")),
+                )
+            )
+        self.tokens = tokens
+        self.blacklist = set(str(x) for x in payload.get("blacklist", []))
+        self.logs = logs[-500:]
 
     async def add_token(self, req: AddTokenRequest) -> TokenRecord:
         if req.network.lower() != "solana":
@@ -287,6 +378,7 @@ class MonitorService:
                 return token
             token = TokenRecord(network=req.network.lower(), address=req.address, symbol=req.symbol)
             self.tokens[req.address] = token
+            self.save_state()
             return token
 
     async def tick(self) -> None:
@@ -350,6 +442,7 @@ class MonitorService:
                     )
                 )
                 self.logs = self.logs[-500:]
+                self.save_state()
             except Exception as exc:
                 self.logs.append(
                     SignalLog(
@@ -361,6 +454,7 @@ class MonitorService:
                         reason=f"tick error: {exc}",
                     )
                 )
+                self.save_state()
 
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         too_low_fdv = token.fdv is not None and token.fdv < 20000
@@ -384,6 +478,7 @@ class MonitorService:
                 reason="白名单移除并加入黑名单",
             )
         )
+        self.save_state()
 
 
 service = MonitorService()
@@ -393,6 +488,8 @@ templates = Jinja2Templates(directory="templates")
 
 @app.on_event("startup")
 async def startup() -> None:
+    service.load_state()
+
     async def loop() -> None:
         while True:
             await service.tick()

@@ -1,3 +1,4 @@
+from pathlib import Path
 from datetime import datetime, timezone
 
 from app.main import (
@@ -6,6 +7,7 @@ from app.main import (
     Signal,
     StrategyEngine,
     TokenRecord,
+    MonitorService,
     ema,
     format_pool_age,
     parse_cg_datetime,
@@ -55,3 +57,24 @@ def test_parse_cg_datetime_supports_seconds_and_milliseconds():
     assert sec is not None and sec.tzinfo is not None
     assert ms is not None and ms.tzinfo is not None
     assert sec == ms
+
+
+def test_persistence_roundtrip(tmp_path: Path):
+    svc = MonitorService()
+    svc.state_path = tmp_path / "state.json"
+
+    token = TokenRecord(network="solana", address="addr1", symbol="AAA")
+    token.fdv = 12345
+    token.price = 0.12
+    svc.tokens[token.address] = token
+    svc.blacklist.add("addr2")
+    svc.save_state()
+
+    restored = MonitorService()
+    restored.state_path = svc.state_path
+    restored.load_state()
+
+    assert "addr1" in restored.tokens
+    assert restored.tokens["addr1"].symbol == "AAA"
+    assert restored.tokens["addr1"].fdv == 12345
+    assert "addr2" in restored.blacklist
