@@ -8,6 +8,7 @@ from app.main import (
     TokenRecord,
     ema,
     format_token_age,
+    parse_cg_datetime,
     rsi,
 )
 
@@ -46,3 +47,11 @@ def test_format_token_age_uses_created_time_only():
     created = datetime(2026, 1, 1, 10, 30, tzinfo=timezone.utc)
     assert format_token_age(created, now) == "1.50h"
     assert format_token_age(None, now) == "N/A"
+
+
+def test_parse_cg_datetime_supports_seconds_and_milliseconds():
+    sec = parse_cg_datetime(1700000000)
+    ms = parse_cg_datetime(1700000000000)
+    assert sec is not None and sec.tzinfo is not None
+    assert ms is not None and ms.tzinfo is not None
+    assert sec == ms

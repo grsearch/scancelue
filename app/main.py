@@ -7,12 +7,36 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from starlette.requests import Request
+
+
+def parse_cg_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:
+            ts = ts / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            ts = float(raw)
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    return None
 
 
 class MarketState(str, Enum):
@@ -274,14 +298,19 @@ class MonitorService:
                 token.fdv = meta["fdv"]
                 token.price = meta["price"]
                 created = meta.get("created_at")
-                if created and isinstance(created, str):
-                    token.created_at = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                parsed_created = parse_cg_datetime(created)
+                if parsed_created:
+                    token.created_at = parsed_created
 
                 await self._handle_whitelist_exit(token)
                 if token.address in self.blacklist:
                     continue
 
                 ohlcv = await self.gecko.fetch_ohlcv(token.network, token.address)
+                if token.created_at is None and ohlcv:
+                    earliest_ts = min(float(c[0]) for c in ohlcv)
+                    token.created_at = parse_cg_datetime(earliest_ts)
+
                 closes = [float(c[4]) for c in ohlcv]
                 if len(closes) < 30:
                     continue
