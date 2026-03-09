@@ -42,12 +42,14 @@ def parse_cg_datetime(value: Any) -> datetime | None:
 
 
 class MarketState(str, Enum):
+    PRE_TREND = "pre_trend"
     TREND = "trend"
     RANGE = "range"
     DOWN = "down"
 
 
 class StrategyName(str, Enum):
+    PRE_TREND = "pre_trend_strategy"
     TREND = "trend_strategy"
     RSI = "rsi_strategy"
     SELL_ONLY = "sell_only"
@@ -61,6 +63,7 @@ class Signal(str, Enum):
 
 
 STATE_STRATEGY = {
+    MarketState.PRE_TREND: StrategyName.PRE_TREND,
     MarketState.TREND: StrategyName.TREND,
     MarketState.RANGE: StrategyName.RSI,
     MarketState.DOWN: StrategyName.SELL_ONLY,
@@ -212,14 +215,42 @@ def recent_pump_ratio(closes: list[float], lookback: int = 3) -> float:
     return (closes[-1] - base) / base
 
 
+def max_recent_candle_gain(closes: list[float], bars: int = 2) -> float:
+    if len(closes) < bars + 1:
+        return 0.0
+    gains = []
+    for i in range(-bars, 0):
+        prev = closes[i - 1]
+        curr = closes[i]
+        if prev <= 0:
+            gains.append(0.0)
+        else:
+            gains.append((curr - prev) / prev)
+    return max(gains) if gains else 0.0
+
+
+def distance_from_ema(close: float, ema_value: float) -> float:
+    if ema_value == 0:
+        return 0.0
+    return abs(close - ema_value) / abs(ema_value)
+
+
 class StrategyEngine:
     @staticmethod
     def raw_state(ema9: float, ema20: float, ema20_prev: float, now_rsi: float) -> MarketState:
-        if ema9 > ema20 and ema20 > ema20_prev and now_rsi >= 55:
+        if ema9 > ema20 and ema20 > ema20_prev and now_rsi >= 52:
             return MarketState.TREND
         if ema9 < ema20 and ema20 < ema20_prev and now_rsi <= 40:
             return MarketState.DOWN
+        if ema9 >= ema20 * 0.992 and ema20 >= ema20_prev * 0.998 and now_rsi >= 50:
+            return MarketState.PRE_TREND
         return MarketState.RANGE
+
+    @staticmethod
+    def required_confirmations(new_state: MarketState) -> int:
+        if new_state == MarketState.PRE_TREND:
+            return 1
+        return 2
 
     @staticmethod
     def confirm_state(token: TokenRecord, new_state: MarketState) -> MarketState:
@@ -230,9 +261,10 @@ class StrategyEngine:
         if token.candidate_state != new_state:
             token.candidate_state = new_state
             token.candidate_count = 1
-            return token.confirmed_state
-        token.candidate_count += 1
-        if token.candidate_count >= 2:
+        else:
+            token.candidate_count += 1
+
+        if token.candidate_count >= StrategyEngine.required_confirmations(new_state):
             token.confirmed_state = new_state
             token.candidate_state = None
             token.candidate_count = 0
@@ -243,28 +275,41 @@ class StrategyEngine:
         strategy = STATE_STRATEGY[token.confirmed_state]
         close = closes[-1]
         pump_3m = recent_pump_ratio(closes, 3)
-        breakout_ref = max(closes[-6:-1]) if len(closes) >= 6 else close
+        max_2bar_gain = max_recent_candle_gain(closes, 2)
+        ema9_dist = distance_from_ema(close, ema9)
+        breakout_ref_5 = max(closes[-6:-1]) if len(closes) >= 6 else close
+        breakout_ref_8 = max(closes[-9:-1]) if len(closes) >= 9 else breakout_ref_5
+
+        if strategy == StrategyName.PRE_TREND:
+            if token.position.has_position:
+                return strategy, Signal.HOLD, "pre_trend状态持仓中，等待确认"
+            if ema9_dist > 0.03 or pump_3m >= 0.06 or max_2bar_gain >= 0.045 or rsi_now > 72:
+                return strategy, Signal.HOLD, "pre_trend状态过热，避免追高"
+            if 50 <= rsi_now <= 65 and close > breakout_ref_8 * 1.001 and ema9 >= ema20 * 0.992:
+                return strategy, Signal.BUY, "pre_trend启动突破，试仓买入"
+            return strategy, Signal.HOLD, "pre_trend状态等待触发"
 
         if strategy == StrategyName.TREND:
             if close < ema20 or (rsi_prev >= 80 and rsi_now < 75) or rsi_now >= 88:
                 return strategy, Signal.SELL, "trend状态触发保护性卖出（跌破EMA20或RSI回落）"
             if token.position.has_position:
                 return strategy, Signal.HOLD, "trend状态持仓中，等待退出条件"
-            if pump_3m >= 0.08:
-                return strategy, Signal.HOLD, "trend状态检测到短时拉升过快，避免追高"
-            if ema9 > ema20 and 55 < rsi_now < 72 and near(close, ema9, 0.008) and close >= ema9 * 0.994:
+            if ema9_dist > 0.03 or pump_3m >= 0.06 or max_2bar_gain >= 0.045 or rsi_now > 72:
+                return strategy, Signal.HOLD, "trend状态过热，避免追高"
+            if ema9 > ema20 and 50 < rsi_now < 68 and near(close, ema9, 0.012) and close >= ema9 * 0.99:
                 return strategy, Signal.BUY, "trend状态回踩EMA9买入"
-            if ema9 > ema20 and 58 <= rsi_now <= 70 and close > breakout_ref * 1.001:
-                return strategy, Signal.BUY, "trend状态突破近5根高点买入"
+            if ema9 > ema20 and 52 <= rsi_now <= 66 and close > breakout_ref_8 * 1.001:
+                return strategy, Signal.BUY, "trend状态突破近8根高点买入"
             return strategy, Signal.HOLD, "trend状态无新信号"
 
         if strategy == StrategyName.RSI:
             if rsi_now >= 85 or cross_down(rsi_prev, rsi_now, 70) or cross_down(rsi_prev, rsi_now, 60):
                 return strategy, Signal.SELL, "range状态RSI卖出条件触发"
+            weak_structure = len(closes) >= 4 and closes[-1] < closes[-2] < closes[-3]
             if token.position.has_position and (not token.position.added_once) and cross_up(rsi_prev, rsi_now, 25):
                 return strategy, Signal.ADD, "range状态RSI二次上穿25，补仓一次"
-            if (not token.position.has_position) and cross_up(rsi_prev, rsi_now, 30):
-                return strategy, Signal.BUY, "range状态RSI上穿30，反弹买入"
+            if (not token.position.has_position) and cross_up(rsi_prev, rsi_now, 30) and ema9 >= ema20 * 0.995 and close >= ema9 * 0.998 and (not weak_structure):
+                return strategy, Signal.BUY, "range状态上穿30且结构转强，反弹买入"
             return strategy, Signal.HOLD, "range状态无新信号"
 
         if token.position.has_position and (

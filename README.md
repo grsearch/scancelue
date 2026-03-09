@@ -4,7 +4,7 @@
 
 - `POST /webhook/add-token`：接收龙虾AI扫链 webhook，收录白名单并开始 1 分钟监控。
 - 从 CoinGecko Pro On-Chain API 拉取 SOL 新币数据（OHLCV + FDV/价格/池创建时间(pool_created_at)）。
-- 按你定义的 `trend/range/down` 三态 + 策略切换二次确认机制输出 `BUY/ADD/SELL/HOLD`。
+- 按你定义的 `pre_trend/trend/range/down` 四态进行策略切换，并输出 `BUY/ADD/SELL/HOLD`。
 - 自动将交易信号通过 webhook 下发：
   - BUY/ADD -> `POST /webhook/new-token`
   - SELL -> `POST /force-sell`

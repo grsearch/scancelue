@@ -12,6 +12,8 @@ from app.main import (
     format_pool_age,
     parse_cg_datetime,
     recent_pump_ratio,
+    distance_from_ema,
+    max_recent_candle_gain,
     rsi,
 )
 
@@ -93,3 +95,28 @@ def test_range_buy_uses_cross_up_30():
     strategy, sig, _ = StrategyEngine.evaluate(token, [1, 1.0, 1.01, 1.02, 1.03, 1.04], 1.03, 1.02, 29.5, 31.0)
     assert strategy.value == "rsi_strategy"
     assert sig == Signal.BUY
+
+
+def test_raw_state_can_enter_pre_trend_earlier():
+    state = StrategyEngine.raw_state(10.0, 10.02, 10.01, 53)
+    assert state == MarketState.PRE_TREND
+
+
+def test_pre_trend_switch_requires_single_confirmation():
+    token = TokenRecord(network="solana", address="p1", symbol="P")
+    state = StrategyEngine.confirm_state(token, MarketState.PRE_TREND)
+    assert state == MarketState.PRE_TREND
+
+
+def test_trend_anti_chase_filter_blocks_overheated_buy():
+    token = TokenRecord(network="solana", address="hot", symbol="H")
+    token.confirmed_state = MarketState.TREND
+    closes = [100, 101, 102, 104, 106, 108, 110]
+    strategy, sig, _ = StrategyEngine.evaluate(token, closes, 106, 103, 65, 69)
+    assert strategy.value == "trend_strategy"
+    assert sig == Signal.HOLD
+
+
+def test_helper_dist_and_candle_gain():
+    assert round(distance_from_ema(103, 100), 4) == 0.03
+    assert round(max_recent_candle_gain([100, 103, 105], 2), 4) == 0.03
