@@ -7,7 +7,7 @@ from app.main import (
     StrategyEngine,
     TokenRecord,
     ema,
-    format_token_age,
+    format_pool_age,
     parse_cg_datetime,
     rsi,
 )
@@ -42,11 +42,11 @@ def test_sell_only_never_buy():
     assert strategy.value == "sell_only"
 
 
-def test_format_token_age_uses_created_time_only():
+def test_format_pool_age_uses_pool_created_time_only():
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     created = datetime(2026, 1, 1, 10, 30, tzinfo=timezone.utc)
-    assert format_token_age(created, now) == "1.50h"
-    assert format_token_age(None, now) == "N/A"
+    assert format_pool_age(created, now) == "1.50h"
+    assert format_pool_age(None, now) == "N/A"
 
 
 def test_parse_cg_datetime_supports_seconds_and_milliseconds():

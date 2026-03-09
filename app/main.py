@@ -77,7 +77,7 @@ class TokenRecord:
     address: str
     symbol: str
     added_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    created_at: datetime | None = None
+    pool_created_at: datetime | None = None
     fdv: float | None = None
     price: float | None = None
     confirmed_state: MarketState = MarketState.RANGE
@@ -132,7 +132,8 @@ class GeckoClient:
         return {
             "fdv": float(attributes.get("fdv_usd") or 0),
             "price": float(attributes.get("price_usd") or 0),
-            "created_at": attributes.get("pool_created_at") or attributes.get("created_at"),
+            "pool_created_at": attributes.get("pool_created_at"),
+            "created_at": attributes.get("created_at"),
         }
 
 
@@ -254,12 +255,12 @@ class StrategyEngine:
         return strategy, Signal.HOLD, "down状态禁止新开仓"
 
 
-def format_token_age(created_at: datetime | None, now: datetime | None = None) -> str:
-    """Dashboard AGE should represent token creation age, not whitelist inclusion age."""
-    if created_at is None:
+def format_pool_age(pool_created_at: datetime | None, now: datetime | None = None) -> str:
+    """Dashboard AGE uses pool creation age from CoinGecko pool_created_at."""
+    if pool_created_at is None:
         return "N/A"
     now = now or datetime.now(timezone.utc)
-    age_h = (now - created_at).total_seconds() / 3600
+    age_h = (now - pool_created_at).total_seconds() / 3600
     if age_h < 0:
         return "0.00h"
     return f"{age_h:.2f}h"
@@ -297,20 +298,20 @@ class MonitorService:
                 meta = await self.gecko.fetch_token_meta(token.network, token.address)
                 token.fdv = meta["fdv"]
                 token.price = meta["price"]
-                created = meta.get("created_at")
-                parsed_created = parse_cg_datetime(created)
-                if parsed_created:
-                    token.created_at = parsed_created
+                pool_created = meta.get("pool_created_at")
+                parsed_pool_created = parse_cg_datetime(pool_created)
+                if parsed_pool_created:
+                    token.pool_created_at = parsed_pool_created
+                elif token.pool_created_at is None:
+                    parsed_created = parse_cg_datetime(meta.get("created_at"))
+                    if parsed_created:
+                        token.pool_created_at = parsed_created
 
                 await self._handle_whitelist_exit(token)
                 if token.address in self.blacklist:
                     continue
 
                 ohlcv = await self.gecko.fetch_ohlcv(token.network, token.address)
-                if token.created_at is None and ohlcv:
-                    earliest_ts = min(float(c[0]) for c in ohlcv)
-                    token.created_at = parse_cg_datetime(earliest_ts)
-
                 closes = [float(c[4]) for c in ohlcv]
                 if len(closes) < 30:
                     continue
@@ -364,8 +365,8 @@ class MonitorService:
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         too_low_fdv = token.fdv is not None and token.fdv < 20000
         too_old = False
-        if token.created_at:
-            too_old = (datetime.now(timezone.utc) - token.created_at).total_seconds() > 48 * 3600
+        if token.pool_created_at:
+            too_old = (datetime.now(timezone.utc) - token.pool_created_at).total_seconds() > 48 * 3600
         if not (too_low_fdv or too_old):
             return
         if token.position.has_position:
@@ -418,7 +419,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         tokens.append(
             {
                 "symbol": t.symbol,
-                "age": format_token_age(t.created_at, now),
+                "age": format_pool_age(t.pool_created_at, now),
                 "fdv": f"{(t.fdv or 0):,.0f}",
                 "address": t.address,
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
