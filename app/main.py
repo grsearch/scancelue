@@ -203,6 +203,15 @@ def cross_down(prev: float, curr: float, level: float) -> bool:
     return prev >= level > curr
 
 
+def recent_pump_ratio(closes: list[float], lookback: int = 3) -> float:
+    if len(closes) <= lookback:
+        return 0.0
+    base = closes[-(lookback + 1)]
+    if base <= 0:
+        return 0.0
+    return (closes[-1] - base) / base
+
+
 class StrategyEngine:
     @staticmethod
     def raw_state(ema9: float, ema20: float, ema20_prev: float, now_rsi: float) -> MarketState:
@@ -233,12 +242,20 @@ class StrategyEngine:
     def evaluate(token: TokenRecord, closes: list[float], ema9: float, ema20: float, rsi_prev: float, rsi_now: float) -> tuple[StrategyName, Signal, str]:
         strategy = STATE_STRATEGY[token.confirmed_state]
         close = closes[-1]
+        pump_3m = recent_pump_ratio(closes, 3)
+        breakout_ref = max(closes[-6:-1]) if len(closes) >= 6 else close
 
         if strategy == StrategyName.TREND:
-            if close < ema9 or rsi_now >= 85:
-                return strategy, Signal.SELL, "trend状态触发止盈/止损"
-            if (not token.position.has_position and ema9 > ema20 and rsi_now > 55 and near(close, ema9, 0.006) and close >= ema9 * 0.995):
-                return strategy, Signal.BUY, "trend状态下价格回踩EMA9，满足趋势买入"
+            if close < ema20 or (rsi_prev >= 80 and rsi_now < 75) or rsi_now >= 88:
+                return strategy, Signal.SELL, "trend状态触发保护性卖出（跌破EMA20或RSI回落）"
+            if token.position.has_position:
+                return strategy, Signal.HOLD, "trend状态持仓中，等待退出条件"
+            if pump_3m >= 0.08:
+                return strategy, Signal.HOLD, "trend状态检测到短时拉升过快，避免追高"
+            if ema9 > ema20 and 55 < rsi_now < 72 and near(close, ema9, 0.008) and close >= ema9 * 0.994:
+                return strategy, Signal.BUY, "trend状态回踩EMA9买入"
+            if ema9 > ema20 and 58 <= rsi_now <= 70 and close > breakout_ref * 1.001:
+                return strategy, Signal.BUY, "trend状态突破近5根高点买入"
             return strategy, Signal.HOLD, "trend状态无新信号"
 
         if strategy == StrategyName.RSI:
@@ -246,8 +263,8 @@ class StrategyEngine:
                 return strategy, Signal.SELL, "range状态RSI卖出条件触发"
             if token.position.has_position and (not token.position.added_once) and cross_up(rsi_prev, rsi_now, 25):
                 return strategy, Signal.ADD, "range状态RSI二次上穿25，补仓一次"
-            if (not token.position.has_position) and cross_up(rsi_prev, rsi_now, 25):
-                return strategy, Signal.BUY, "range状态RSI上穿25，反弹买入"
+            if (not token.position.has_position) and cross_up(rsi_prev, rsi_now, 30):
+                return strategy, Signal.BUY, "range状态RSI上穿30，反弹买入"
             return strategy, Signal.HOLD, "range状态无新信号"
 
         if token.position.has_position and (

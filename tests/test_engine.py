@@ -11,6 +11,7 @@ from app.main import (
     ema,
     format_pool_age,
     parse_cg_datetime,
+    recent_pump_ratio,
     rsi,
 )
 
@@ -78,3 +79,17 @@ def test_persistence_roundtrip(tmp_path: Path):
     assert restored.tokens["addr1"].symbol == "AAA"
     assert restored.tokens["addr1"].fdv == 12345
     assert "addr2" in restored.blacklist
+
+
+def test_recent_pump_ratio():
+    closes = [100, 101, 102, 111]
+    assert round(recent_pump_ratio(closes, 3), 4) == 0.11
+
+
+def test_range_buy_uses_cross_up_30():
+    token = TokenRecord(network="solana", address="x2", symbol="R")
+    token.confirmed_state = MarketState.RANGE
+    token.position = PositionState(has_position=False)
+    strategy, sig, _ = StrategyEngine.evaluate(token, [1, 1.0, 1.01, 1.02, 1.03, 1.04], 1.03, 1.02, 29.5, 31.0)
+    assert strategy.value == "rsi_strategy"
+    assert sig == Signal.BUY
