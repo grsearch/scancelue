@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SOL Monitor Dashboard</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; background: #0f172a; color: #e2e8f0; }
+      h1, h2 { margin: 0 0 12px; }
+      .card { background: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: 10px; border-bottom: 1px solid #334155; text-align: left; font-size: 14px; }
+      a { color: #93c5fd; text-decoration: none; }
+      .BUY, .ADD { color: #4ade80; }
+      .SELL { color: #f87171; }
+      .HOLD { color: #facc15; }
+    </style>
+  </head>
+  <body>
+    <h1>SOL 新币监控 Dashboard</h1>
+
+    <div class="card">
+      <h2>白名单监控代币</h2>
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>AGE</th><th>FDV</th><th>合约地址</th></tr>
+        </thead>
+        <tbody>
+          {% for t in tokens %}
+          <tr>
+            <td>{{ t.symbol }}</td>
+            <td>{{ t.age }}</td>
+            <td>{{ t.fdv }}</td>
+            <td><a href="{{ t.gmgn }}" target="_blank">{{ t.address }}</a></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4">暂无监控代币</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>信号发送记录</h2>
+      <table>
+        <thead>
+          <tr><th>时间</th><th>代币</th><th>策略</th><th>信号</th><th>原因</th></tr>
+        </thead>
+        <tbody>
+          {% for l in logs %}
+          <tr>
+            <td>{{ l.ts }}</td>
+            <td>{{ l.symbol }}</td>
+            <td>{{ l.strategy }}</td>
+            <td class="{{ l.signal }}">{{ l.signal }}</td>
+            <td>{{ l.reason }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5">暂无信号记录</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </body>
+</html>
