@@ -277,17 +277,12 @@ class StrategyEngine:
         # manage existing positions first (sell/add)
         if has_rebound:
             entry = token.rebound_entry_price or close_1m
-            if close_1m <= entry * 0.90:
-                return StrategyName.REBOUND, Signal.SELL, "反弹策略触发10%止损"
             if rsi1_now >= 85 or cross_down(rsi1_prev, rsi1_now, 75) or cross_down(rsi1_prev, rsi1_now, 65):
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI回落/过热"
             if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
                 return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30且价格<=首仓90%"
 
         if has_startup and None not in (ema9_5m, ema20_5m, ema9_5m_prev, ema20_5m_prev, close_5m):
-            entry = token.startup_entry_price or close_1m
-            if close_1m <= entry * 0.90:
-                return StrategyName.STARTUP, Signal.SELL, "启动策略触发10%止损"
             ema_cross_down = ema9_5m_prev >= ema20_5m_prev and ema9_5m < ema20_5m
             if ema_cross_down or (close_5m < ema9_5m):
                 return StrategyName.STARTUP, Signal.SELL, "启动策略卖出：EMA9下穿EMA20或close<EMA9"

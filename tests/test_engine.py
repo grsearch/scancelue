@@ -86,14 +86,14 @@ def test_startup_buy_and_sell_on_5m_logic():
     assert signal == Signal.SELL
 
 
-def test_stop_loss_10_percent_and_open_gate_hold():
+def test_open_gate_hold_without_stoploss():
     token = TokenRecord(network="solana", address="c", symbol="C")
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True)
     strategy, signal, reason = StrategyEngine.evaluate(token, [100, 95, 90], 95, 96, 45, 44, True, None, None, None, None, None, None, None, None, None)
     assert strategy == StrategyName.REBOUND
-    assert signal == Signal.SELL
-    assert "10%止损" in reason
+    assert signal == Signal.HOLD
+    assert "持仓中" in reason
 
     flat = TokenRecord(network="solana", address="d", symbol="D")
     strategy, signal, reason = StrategyEngine.evaluate(flat, [1, 1.01, 1.02], 1.0, 1.0, 49, 52, False, None, None, None, None, None, None, None, None, None)
