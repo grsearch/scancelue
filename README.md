@@ -4,7 +4,7 @@
 
 - `POST /webhook/add-token`：接收龙虾AI扫链 webhook，收录白名单并开始 1 分钟监控。
 - 从 CoinGecko Pro On-Chain API 拉取 SOL 新币数据（OHLCV + FDV/价格/池创建时间(pool_created_at)）。
-- 执行两套固定策略（RSI=9, EMA9, EMA20）：反弹策略 + 启动策略，并输出 `BUY/SELL/HOLD`。
+- 先通过5分钟EMA过滤（EMA9 > EMA20才允许开单），再在1分钟执行两套固定策略（RSI=9, EMA9, EMA20）：反弹策略 + 启动策略，并输出 `BUY/SELL/HOLD`。
 - 自动将交易信号通过 webhook 下发：
   - BUY -> `POST /webhook/new-token`
   - SELL -> `POST /force-sell`
@@ -39,3 +39,4 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 -H "Content-Type: application/json" \
 -d '{"network":"solana","address":"8jiVXftnn2ZG6bugK7HAH5j2G3D6TpsG521gqsWwpump","symbol":"AUTISM"}'
 ```
+

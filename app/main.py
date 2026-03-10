@@ -114,9 +114,9 @@ class GeckoClient:
         self.base = os.getenv("COINGECKO_BASE_URL", "https://pro-api.coingecko.com/api/v3/onchain")
         self.api_key = os.getenv("COINGECKO_API_KEY", "")
 
-    async def fetch_ohlcv(self, network: str, token: str) -> list[list[float]]:
-        # 1m candles. We request up to 200 bars for EMA20/RSI9 stability.
-        url = f"{self.base}/networks/{network}/tokens/{token}/ohlcv/minute"
+    async def fetch_ohlcv(self, network: str, token: str, timeframe: str = "minute") -> list[list[float]]:
+        # We request up to 200 bars for EMA20/RSI9 stability.
+        url = f"{self.base}/networks/{network}/tokens/{token}/ohlcv/{timeframe}"
         params = {"limit": 200}
         headers = {"x-cg-pro-api-key": self.api_key} if self.api_key else {}
         async with httpx.AsyncClient(timeout=20) as client:
@@ -238,34 +238,52 @@ def distance_from_ema(close: float, ema_value: float) -> float:
 
 class StrategyEngine:
     @staticmethod
-    def evaluate(token: TokenRecord, closes: list[float], ema9: float, ema20: float, rsi_prev: float, rsi_now: float) -> tuple[StrategyName, Signal, str]:
+    def evaluate(
+        token: TokenRecord,
+        closes: list[float],
+        ema9: float,
+        ema20: float,
+        rsi_prev: float,
+        rsi_now: float,
+        allow_open: bool,
+    ) -> tuple[StrategyName, Signal, str]:
         close = closes[-1]
 
         if token.position.has_position:
             entry = token.entry_price or close
-            if close <= entry * 0.95:
+            if close <= entry * 0.90:
                 strategy = token.active_strategy or StrategyName.SELL_ONLY
-                return strategy, Signal.SELL, "触发5%止损"
+                return strategy, Signal.SELL, "触发10%止损"
 
             if token.active_strategy == StrategyName.REBOUND:
-                if close >= ema9 or rsi_now >= 55:
-                    return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：到达EMA9或RSI>=55"
+                if rsi_now >= 85 or cross_down(rsi_prev, rsi_now, 75) or cross_down(rsi_prev, rsi_now, 65):
+                    return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI回落/过热"
                 return StrategyName.REBOUND, Signal.HOLD, "反弹策略持仓中"
 
-            # default use startup exit when strategy missing or startup
-            if rsi_now >= 75 or ema9 < ema20:
-                return StrategyName.STARTUP, Signal.SELL, "启动策略卖出：RSI>=75或EMA9<EMA20"
+            if rsi_now >= 85 or cross_down(rsi_prev, rsi_now, 75) or ema9 < ema20:
+                return StrategyName.STARTUP, Signal.SELL, "启动策略卖出：RSI>=85或下穿75或EMA死叉"
             return StrategyName.STARTUP, Signal.HOLD, "启动策略持仓中"
 
-        rebound_buy = (rsi_prev > 20 and rsi_now <= 20 and close < ema9 * 0.97)
-        startup_buy = (rsi_prev < 50 and rsi_now >= 50 and rsi_now <= 65 and ema9 > ema20 and close > ema9)
+        if not allow_open:
+            if ema9 > ema20:
+                return StrategyName.STARTUP, Signal.HOLD, "5分钟EMA9<=EMA20，禁止开单"
+            return StrategyName.REBOUND, Signal.HOLD, "5分钟EMA9<=EMA20，禁止开单"
+
+        rebound_buy = cross_up(rsi_prev, rsi_now, 30)
+        startup_buy = (
+            rsi_prev < 50
+            and rsi_now >= 50
+            and rsi_now <= 70
+            and ema9 > ema20
+            and close > ema9
+            and close <= ema9 * 1.02
+        )
 
         if rebound_buy:
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI下穿20且价格低于EMA9*0.97"
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
         if startup_buy:
-            return StrategyName.STARTUP, Signal.BUY, "启动策略买入：RSI上穿50且EMA9>EMA20"
+            return StrategyName.STARTUP, Signal.BUY, "启动策略买入：RSI上穿50且价格贴近EMA9"
 
-        # give a strategy label for logging even without signal
         if ema9 > ema20:
             return StrategyName.STARTUP, Signal.HOLD, "无买卖信号"
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
@@ -434,7 +452,16 @@ class MonitorService:
                 ema20_now = ema20_vals[-1]
                 close = closes[-1]
                 rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
-                strategy, signal, reason = self.engine.evaluate(token, closes, ema9_now, ema20_now, rsi_prev, rsi_now)
+
+                # Use 1m data resampled to 5m closes for open-gate filter
+                closes_5m = [closes[i] for i in range(4, len(closes), 5)]
+                allow_open = False
+                if len(closes_5m) >= 20:
+                    ema9_5m = ema(closes_5m, 9)[-1]
+                    ema20_5m = ema(closes_5m, 20)[-1]
+                    allow_open = ema9_5m > ema20_5m
+
+                strategy, signal, reason = self.engine.evaluate(token, closes, ema9_now, ema20_now, rsi_prev, rsi_now, allow_open)
 
                 if signal == Signal.BUY:
                     token.position.has_position = True
