@@ -4,7 +4,7 @@
 
 - `POST /webhook/add-token`：接收龙虾AI扫链 webhook，收录白名单并开始 1 分钟监控。
 - 从 CoinGecko Pro On-Chain API 拉取 SOL 新币数据（OHLCV + FDV/价格/池创建时间(pool_created_at)）。
-- 先通过5分钟EMA过滤（EMA9 > EMA20才允许开单），再在1分钟执行两套固定策略（RSI=9, EMA9, EMA20）：反弹策略 + 启动策略，并输出 `BUY/SELL/HOLD`。
+- 先通过5分钟EMA过滤（EMA9 > EMA20才允许开单），再在1分钟执行反弹策略（RSI=9, EMA9, EMA20），并输出 `BUY/ADD/SELL/HOLD`。
 - 自动将交易信号通过 webhook 下发：
   - BUY -> `POST /webhook/new-token`
   - SELL -> `POST /force-sell`
@@ -39,4 +39,12 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 -H "Content-Type: application/json" \
 -d '{"network":"solana","address":"8jiVXftnn2ZG6bugK7HAH5j2G3D6TpsG521gqsWwpump","symbol":"AUTISM"}'
 ```
+
+## 当前实盘策略
+
+- 开单前过滤（5m）：`EMA9 > EMA20`，否则禁止开新单。
+- 反弹策略买入：`RSI 上穿 30`。
+- 反弹策略加仓（仅一次）：在已有仓位下，且满足 5m 开单条件，`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.90`。
+- 反弹策略卖出：`RSI 下穿 65` 或 `RSI 下穿 75` 或 `RSI >= 85`。
+- 反弹策略止损：`close <= entry * 0.90`（10%）。
 

@@ -50,7 +50,6 @@ class MarketState(str, Enum):
 
 class StrategyName(str, Enum):
     REBOUND = "rebound_strategy"
-    STARTUP = "startup_strategy"
     SELL_ONLY = "sell_only"
 
 
@@ -62,8 +61,8 @@ class Signal(str, Enum):
 
 
 STATE_STRATEGY = {
-    MarketState.PRE_TREND: StrategyName.STARTUP,
-    MarketState.TREND: StrategyName.STARTUP,
+    MarketState.PRE_TREND: StrategyName.REBOUND,
+    MarketState.TREND: StrategyName.REBOUND,
     MarketState.RANGE: StrategyName.REBOUND,
     MarketState.DOWN: StrategyName.SELL_ONLY,
 }
@@ -90,7 +89,6 @@ class TokenRecord:
     position: PositionState = field(default_factory=PositionState)
     last_rsi: float | None = None
     rebound_entry_price: float | None = None
-    startup_entry_price: float | None = None
 
 
 @dataclass
@@ -249,42 +247,25 @@ class StrategyEngine:
     ) -> tuple[StrategyName, Signal, str]:
         close = closes[-1]
         has_rebound = token.rebound_entry_price is not None
-        has_startup = token.startup_entry_price is not None
 
-        # SELL priority: REBOUND first, then STARTUP
         if has_rebound:
             entry = token.rebound_entry_price or close
             if close <= entry * 0.90:
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略触发10%止损"
             if rsi_now >= 85 or cross_down(rsi_prev, rsi_now, 75) or cross_down(rsi_prev, rsi_now, 65):
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI回落/过热"
-
-        if has_startup:
-            entry = token.startup_entry_price or close
-            if close <= entry * 0.90:
-                return StrategyName.STARTUP, Signal.SELL, "启动策略触发10%止损"
-            if rsi_now >= 85 or cross_down(rsi_prev, rsi_now, 75) or ema9 < ema20:
-                return StrategyName.STARTUP, Signal.SELL, "启动策略卖出：RSI>=85或下穿75或EMA死叉"
+            if allow_open and (not token.position.added_once) and cross_up(rsi_prev, rsi_now, 30) and close <= entry * 0.90:
+                return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30且价格<=首仓90%"
+            return StrategyName.REBOUND, Signal.HOLD, "反弹策略持仓中"
 
         if not allow_open:
-            return StrategyName.STARTUP if ema9 > ema20 else StrategyName.REBOUND, Signal.HOLD, "5分钟EMA9<=EMA20，禁止开单"
+            return StrategyName.REBOUND, Signal.HOLD, "5分钟EMA9<=EMA20，禁止开单"
 
         rebound_buy = cross_up(rsi_prev, rsi_now, 30)
-        startup_buy = (
-            rsi_prev < 50
-            and rsi_now >= 50
-            and rsi_now <= 70
-            and ema9 > ema20
-            and close > ema9
-            and close <= ema9 * 1.02
-        )
-
-        if rebound_buy and (not has_rebound):
+        if rebound_buy:
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
-        if startup_buy and (not has_startup):
-            return StrategyName.STARTUP, Signal.BUY, "启动策略买入：RSI上穿50且价格贴近EMA9"
 
-        return (StrategyName.STARTUP if ema9 > ema20 else StrategyName.REBOUND), Signal.HOLD, "无买卖信号"
+        return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
 
 def format_pool_age(pool_created_at: datetime | None, now: datetime | None = None) -> str:
@@ -333,7 +314,6 @@ class MonitorService:
             },
             "last_rsi": token.last_rsi,
             "rebound_entry_price": token.rebound_entry_price,
-            "startup_entry_price": token.startup_entry_price,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -364,7 +344,6 @@ class MonitorService:
             ),
             last_rsi=payload.get("last_rsi"),
             rebound_entry_price=payload.get("rebound_entry_price"),
-            startup_entry_price=payload.get("startup_entry_price"),
         )
 
     def save_state(self) -> None:
@@ -462,19 +441,16 @@ class MonitorService:
                 strategy, signal, reason = self.engine.evaluate(token, closes, ema9_now, ema20_now, rsi_prev, rsi_now, allow_open)
 
                 if signal == Signal.BUY:
-                    if strategy == StrategyName.REBOUND and token.rebound_entry_price is None:
+                    if token.rebound_entry_price is None:
                         token.rebound_entry_price = close
-                    elif strategy == StrategyName.STARTUP and token.startup_entry_price is None:
-                        token.startup_entry_price = close
-                    token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
+                    token.position.has_position = True
+                elif signal == Signal.ADD:
+                    token.position.has_position = True
+                    token.position.added_once = True
                 elif signal == Signal.SELL:
-                    if strategy == StrategyName.REBOUND:
-                        token.rebound_entry_price = None
-                    elif strategy == StrategyName.STARTUP:
-                        token.startup_entry_price = None
-                    token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
-                    if not token.position.has_position:
-                        token.position.added_once = False
+                    token.rebound_entry_price = None
+                    token.position.has_position = False
+                    token.position.added_once = False
 
                 await self.dispatcher.send(token, signal, reason)
                 self.logs.append(
@@ -509,11 +485,10 @@ class MonitorService:
             too_old = (datetime.now(timezone.utc) - token.pool_created_at).total_seconds() > 48 * 3600
         if not (too_low_fdv or too_old):
             return
-        if token.rebound_entry_price is not None or token.startup_entry_price is not None:
+        if token.rebound_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
             token.position = PositionState()
             token.rebound_entry_price = None
-            token.startup_entry_price = None
         self.tokens.pop(token.address, None)
         self.blacklist.add(token.address)
         self.logs.append(
