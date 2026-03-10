@@ -27,17 +27,17 @@ def test_ema_rsi_shapes_and_cross_helpers():
 
 def test_rebound_buy_add_sell_logic():
     token = TokenRecord(network="solana", address="a", symbol="A")
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 101, 102, 103], 102, 101, 29, 31, True, None, None, None, None, None, None, None)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 101, 102, 103], 102, 101, 29, 31, True, None, None, None, None, None, None, None, None, None)
     assert strategy == StrategyName.REBOUND
     assert signal == Signal.BUY
 
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True, added_once=False)
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 29, 31, True, None, None, None, None, None, None, None)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 29, 31, True, None, None, None, None, None, None, None, None, None)
     assert signal == Signal.ADD
 
     token.position.added_once = True
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 66, 64, True, None, None, None, None, None, None, None)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 66, 64, True, None, None, None, None, None, None, None, None, None)
     assert signal == Signal.SELL
 
 
@@ -58,6 +58,7 @@ def test_startup_buy_and_sell_on_5m_logic():
         99,
         60,
         62,
+        123,
     )
     assert strategy == StrategyName.STARTUP
     assert signal == Signal.BUY
@@ -79,6 +80,7 @@ def test_startup_buy_and_sell_on_5m_logic():
         102,
         74,
         68,
+        124,
     )
     assert strategy == StrategyName.STARTUP
     assert signal == Signal.SELL
@@ -88,13 +90,13 @@ def test_stop_loss_10_percent_and_open_gate_hold():
     token = TokenRecord(network="solana", address="c", symbol="C")
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True)
-    strategy, signal, reason = StrategyEngine.evaluate(token, [100, 95, 90], 95, 96, 45, 44, True, None, None, None, None, None, None, None)
+    strategy, signal, reason = StrategyEngine.evaluate(token, [100, 95, 90], 95, 96, 45, 44, True, None, None, None, None, None, None, None, None, None)
     assert strategy == StrategyName.REBOUND
     assert signal == Signal.SELL
     assert "10%止损" in reason
 
     flat = TokenRecord(network="solana", address="d", symbol="D")
-    strategy, signal, reason = StrategyEngine.evaluate(flat, [1, 1.01, 1.02], 1.0, 1.0, 49, 52, False, None, None, None, None, None, None, None)
+    strategy, signal, reason = StrategyEngine.evaluate(flat, [1, 1.01, 1.02], 1.0, 1.0, 49, 52, False, None, None, None, None, None, None, None, None, None)
     assert signal == Signal.HOLD
     assert "无买卖信号" in reason or "禁止开单" in reason
 
@@ -132,3 +134,16 @@ def test_datetime_and_age_helpers():
     created = datetime(2026, 1, 1, 10, 30, tzinfo=timezone.utc)
     assert format_pool_age(created, now) == "1.50h"
     assert format_pool_age(None, now) == "N/A"
+
+
+def test_startup_buy_only_once_per_5m_cross_bucket():
+    token = TokenRecord(network="solana", address="x", symbol="X")
+    args = (
+        [100, 101, 102], 101, 100, 40, 45, False,
+        102, 100, 99, 98, 99, 60, 62, 200,
+    )
+    strategy, signal, _ = StrategyEngine.evaluate(token, *args)
+    assert strategy == StrategyName.STARTUP and signal == Signal.BUY
+    token.startup_last_buy_bucket = 200
+    strategy, signal, _ = StrategyEngine.evaluate(token, *args)
+    assert signal == Signal.HOLD

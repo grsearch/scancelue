@@ -91,6 +91,7 @@ class TokenRecord:
     last_rsi: float | None = None
     rebound_entry_price: float | None = None
     startup_entry_price: float | None = None
+    startup_last_buy_bucket: int | None = None
 
 
 @dataclass
@@ -236,6 +237,20 @@ def distance_from_ema(close: float, ema_value: float) -> float:
     return abs(close - ema_value) / abs(ema_value)
 
 
+def resample_5m_closes(ohlcv: list[list[float]]) -> list[tuple[int, float]]:
+    buckets: dict[int, list[float]] = {}
+    for row in ohlcv:
+        ts = int(float(row[0]))
+        close = float(row[4])
+        bucket = ts // 300
+        buckets.setdefault(bucket, []).append(close)
+    out: list[tuple[int, float]] = []
+    for b in sorted(buckets):
+        if len(buckets[b]) >= 5:
+            out.append((b, buckets[b][-1]))
+    return out
+
+
 class StrategyEngine:
     @staticmethod
     def evaluate(
@@ -253,6 +268,7 @@ class StrategyEngine:
         ema20_5m_prev: float | None,
         rsi5_prev: float | None,
         rsi5_now: float | None,
+        startup_bucket: int | None,
     ) -> tuple[StrategyName, Signal, str]:
         close_1m = closes_1m[-1]
         has_rebound = token.rebound_entry_price is not None
@@ -282,7 +298,7 @@ class StrategyEngine:
         startup_ready = None not in (close_5m, ema9_5m, ema20_5m, ema9_5m_prev, ema20_5m_prev)
         if startup_ready and (not has_startup):
             startup_buy = (ema9_5m_prev <= ema20_5m_prev and ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.02)
-            if startup_buy:
+            if startup_buy and startup_bucket is not None and token.startup_last_buy_bucket != startup_bucket:
                 return StrategyName.STARTUP, Signal.BUY, "启动策略买入：5分钟EMA9上穿EMA20"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
@@ -335,6 +351,7 @@ class MonitorService:
             "last_rsi": token.last_rsi,
             "rebound_entry_price": token.rebound_entry_price,
             "startup_entry_price": token.startup_entry_price,
+            "startup_last_buy_bucket": token.startup_last_buy_bucket,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -366,6 +383,7 @@ class MonitorService:
             last_rsi=payload.get("last_rsi"),
             rebound_entry_price=payload.get("rebound_entry_price"),
             startup_entry_price=payload.get("startup_entry_price"),
+            startup_last_buy_bucket=payload.get("startup_last_buy_bucket"),
         )
 
     def save_state(self) -> None:
@@ -452,8 +470,10 @@ class MonitorService:
                 close = closes[-1]
                 rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
 
-                # Use 1m data resampled to 5m closes
-                closes_5m = [closes[i] for i in range(4, len(closes), 5)]
+                # Use 1m OHLCV resampled to closed 5m bars
+                bars_5m = resample_5m_closes(ohlcv)
+                closes_5m = [x[1] for x in bars_5m]
+                startup_bucket = bars_5m[-1][0] if bars_5m else None
                 ema9_5m = ema20_5m = ema9_5m_prev = ema20_5m_prev = None
                 rsi5_prev = rsi5_now = None
                 close_5m = closes_5m[-1] if closes_5m else None
@@ -485,6 +505,7 @@ class MonitorService:
                     ema20_5m_prev,
                     rsi5_prev,
                     rsi5_now,
+                    startup_bucket,
                 )
 
                 if signal == Signal.BUY:
@@ -492,6 +513,7 @@ class MonitorService:
                         token.rebound_entry_price = close
                     elif strategy == StrategyName.STARTUP and token.startup_entry_price is None:
                         token.startup_entry_price = close_5m or close
+                        token.startup_last_buy_bucket = startup_bucket
                     token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
                 elif signal == Signal.ADD:
                     token.position.has_position = True
