@@ -297,7 +297,7 @@ class StrategyEngine:
 
         startup_ready = None not in (close_5m, ema9_5m, ema20_5m, ema9_5m_prev, ema20_5m_prev)
         if startup_ready and (not has_startup):
-            startup_buy = (ema9_5m_prev <= ema20_5m_prev and ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.02)
+            startup_buy = (ema9_5m_prev <= ema20_5m_prev and ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.05)
             if startup_buy and startup_bucket is not None and token.startup_last_buy_bucket != startup_bucket:
                 return StrategyName.STARTUP, Signal.BUY, "启动策略买入：5分钟EMA9上穿EMA20"
 
