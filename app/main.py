@@ -49,9 +49,8 @@ class MarketState(str, Enum):
 
 
 class StrategyName(str, Enum):
-    PRE_TREND = "pre_trend_strategy"
-    TREND = "trend_strategy"
-    RSI = "rsi_strategy"
+    REBOUND = "rebound_strategy"
+    STARTUP = "startup_strategy"
     SELL_ONLY = "sell_only"
 
 
@@ -63,9 +62,9 @@ class Signal(str, Enum):
 
 
 STATE_STRATEGY = {
-    MarketState.PRE_TREND: StrategyName.PRE_TREND,
-    MarketState.TREND: StrategyName.TREND,
-    MarketState.RANGE: StrategyName.RSI,
+    MarketState.PRE_TREND: StrategyName.STARTUP,
+    MarketState.TREND: StrategyName.STARTUP,
+    MarketState.RANGE: StrategyName.REBOUND,
     MarketState.DOWN: StrategyName.SELL_ONLY,
 }
 
@@ -90,6 +89,8 @@ class TokenRecord:
     candidate_count: int = 0
     position: PositionState = field(default_factory=PositionState)
     last_rsi: float | None = None
+    entry_price: float | None = None
+    active_strategy: StrategyName | None = None
 
 
 @dataclass
@@ -237,86 +238,37 @@ def distance_from_ema(close: float, ema_value: float) -> float:
 
 class StrategyEngine:
     @staticmethod
-    def raw_state(ema9: float, ema20: float, ema20_prev: float, now_rsi: float) -> MarketState:
-        if ema9 > ema20 and ema20 > ema20_prev and now_rsi >= 52:
-            return MarketState.TREND
-        if ema9 < ema20 and ema20 < ema20_prev and now_rsi <= 40:
-            return MarketState.DOWN
-        if ema9 >= ema20 * 0.992 and ema20 >= ema20_prev * 0.998 and now_rsi >= 50:
-            return MarketState.PRE_TREND
-        return MarketState.RANGE
-
-    @staticmethod
-    def required_confirmations(new_state: MarketState) -> int:
-        if new_state == MarketState.PRE_TREND:
-            return 1
-        return 2
-
-    @staticmethod
-    def confirm_state(token: TokenRecord, new_state: MarketState) -> MarketState:
-        if new_state == token.confirmed_state:
-            token.candidate_state = None
-            token.candidate_count = 0
-            return token.confirmed_state
-        if token.candidate_state != new_state:
-            token.candidate_state = new_state
-            token.candidate_count = 1
-        else:
-            token.candidate_count += 1
-
-        if token.candidate_count >= StrategyEngine.required_confirmations(new_state):
-            token.confirmed_state = new_state
-            token.candidate_state = None
-            token.candidate_count = 0
-        return token.confirmed_state
-
-    @staticmethod
     def evaluate(token: TokenRecord, closes: list[float], ema9: float, ema20: float, rsi_prev: float, rsi_now: float) -> tuple[StrategyName, Signal, str]:
-        strategy = STATE_STRATEGY[token.confirmed_state]
         close = closes[-1]
-        pump_3m = recent_pump_ratio(closes, 3)
-        max_2bar_gain = max_recent_candle_gain(closes, 2)
-        ema9_dist = distance_from_ema(close, ema9)
-        breakout_ref_5 = max(closes[-6:-1]) if len(closes) >= 6 else close
-        breakout_ref_8 = max(closes[-9:-1]) if len(closes) >= 9 else breakout_ref_5
 
-        if strategy == StrategyName.PRE_TREND:
-            if token.position.has_position:
-                return strategy, Signal.HOLD, "pre_trend状态持仓中，等待确认"
-            if ema9_dist > 0.03 or pump_3m >= 0.06 or max_2bar_gain >= 0.045 or rsi_now > 72:
-                return strategy, Signal.HOLD, "pre_trend状态过热，避免追高"
-            if 50 <= rsi_now <= 65 and close > breakout_ref_8 * 1.001 and ema9 >= ema20 * 0.992:
-                return strategy, Signal.BUY, "pre_trend启动突破，试仓买入"
-            return strategy, Signal.HOLD, "pre_trend状态等待触发"
+        if token.position.has_position:
+            entry = token.entry_price or close
+            if close <= entry * 0.95:
+                strategy = token.active_strategy or StrategyName.SELL_ONLY
+                return strategy, Signal.SELL, "触发5%止损"
 
-        if strategy == StrategyName.TREND:
-            if close < ema20 or (rsi_prev >= 80 and rsi_now < 75) or rsi_now >= 88:
-                return strategy, Signal.SELL, "trend状态触发保护性卖出（跌破EMA20或RSI回落）"
-            if token.position.has_position:
-                return strategy, Signal.HOLD, "trend状态持仓中，等待退出条件"
-            if ema9_dist > 0.03 or pump_3m >= 0.06 or max_2bar_gain >= 0.045 or rsi_now > 72:
-                return strategy, Signal.HOLD, "trend状态过热，避免追高"
-            if ema9 > ema20 and 50 < rsi_now < 68 and near(close, ema9, 0.012) and close >= ema9 * 0.99:
-                return strategy, Signal.BUY, "trend状态回踩EMA9买入"
-            if ema9 > ema20 and 52 <= rsi_now <= 66 and close > breakout_ref_8 * 1.001:
-                return strategy, Signal.BUY, "trend状态突破近8根高点买入"
-            return strategy, Signal.HOLD, "trend状态无新信号"
+            if token.active_strategy == StrategyName.REBOUND:
+                if close >= ema9 or rsi_now >= 55:
+                    return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：到达EMA9或RSI>=55"
+                return StrategyName.REBOUND, Signal.HOLD, "反弹策略持仓中"
 
-        if strategy == StrategyName.RSI:
-            if rsi_now >= 85 or cross_down(rsi_prev, rsi_now, 70) or cross_down(rsi_prev, rsi_now, 60):
-                return strategy, Signal.SELL, "range状态RSI卖出条件触发"
-            weak_structure = len(closes) >= 4 and closes[-1] < closes[-2] < closes[-3]
-            if token.position.has_position and (not token.position.added_once) and cross_up(rsi_prev, rsi_now, 25):
-                return strategy, Signal.ADD, "range状态RSI二次上穿25，补仓一次"
-            if (not token.position.has_position) and cross_up(rsi_prev, rsi_now, 30) and ema9 >= ema20 * 0.995 and close >= ema9 * 0.998 and (not weak_structure):
-                return strategy, Signal.BUY, "range状态上穿30且结构转强，反弹买入"
-            return strategy, Signal.HOLD, "range状态无新信号"
+            # default use startup exit when strategy missing or startup
+            if rsi_now >= 75 or ema9 < ema20:
+                return StrategyName.STARTUP, Signal.SELL, "启动策略卖出：RSI>=75或EMA9<EMA20"
+            return StrategyName.STARTUP, Signal.HOLD, "启动策略持仓中"
 
-        if token.position.has_position and (
-            cross_down(rsi_prev, rsi_now, 60) or cross_down(rsi_prev, rsi_now, 50) or close < ema20
-        ):
-            return strategy, Signal.SELL, "down状态仅允许卖出"
-        return strategy, Signal.HOLD, "down状态禁止新开仓"
+        rebound_buy = (rsi_prev > 20 and rsi_now <= 20 and close < ema9 * 0.97)
+        startup_buy = (rsi_prev < 50 and rsi_now >= 50 and rsi_now <= 65 and ema9 > ema20 and close > ema9)
+
+        if rebound_buy:
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI下穿20且价格低于EMA9*0.97"
+        if startup_buy:
+            return StrategyName.STARTUP, Signal.BUY, "启动策略买入：RSI上穿50且EMA9>EMA20"
+
+        # give a strategy label for logging even without signal
+        if ema9 > ema20:
+            return StrategyName.STARTUP, Signal.HOLD, "无买卖信号"
+        return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
 
 def format_pool_age(pool_created_at: datetime | None, now: datetime | None = None) -> str:
@@ -364,6 +316,8 @@ class MonitorService:
                 "added_once": token.position.added_once,
             },
             "last_rsi": token.last_rsi,
+            "entry_price": token.entry_price,
+            "active_strategy": token.active_strategy.value if token.active_strategy else None,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -393,6 +347,8 @@ class MonitorService:
                 added_once=bool(payload.get("position", {}).get("added_once", False)),
             ),
             last_rsi=payload.get("last_rsi"),
+            entry_price=payload.get("entry_price"),
+            active_strategy=StrategyName(payload["active_strategy"]) if payload.get("active_strategy") else None,
         )
 
     def save_state(self) -> None:
@@ -420,7 +376,7 @@ class MonitorService:
                     ts=ts,
                     symbol=str(item.get("symbol", "")),
                     address=str(item.get("address", "")),
-                    strategy=StrategyName(item.get("strategy", StrategyName.RSI.value)),
+                    strategy=StrategyName(item.get("strategy", StrategyName.REBOUND.value)) if item.get("strategy") in {x.value for x in StrategyName} else StrategyName.REBOUND,
                     signal=Signal(item.get("signal", Signal.HOLD.value)),
                     reason=str(item.get("reason", "")),
                 )
@@ -476,21 +432,19 @@ class MonitorService:
                     continue
                 ema9_now = ema9_vals[-1]
                 ema20_now = ema20_vals[-1]
-                ema20_prev = ema20_vals[-2]
+                close = closes[-1]
                 rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
-
-                raw = self.engine.raw_state(ema9_now, ema20_now, ema20_prev, rsi_now)
-                self.engine.confirm_state(token, raw)
                 strategy, signal, reason = self.engine.evaluate(token, closes, ema9_now, ema20_now, rsi_prev, rsi_now)
 
                 if signal == Signal.BUY:
                     token.position.has_position = True
-                elif signal == Signal.ADD:
-                    token.position.has_position = True
-                    token.position.added_once = True
+                    token.entry_price = close
+                    token.active_strategy = strategy
                 elif signal == Signal.SELL:
                     token.position.has_position = False
                     token.position.added_once = False
+                    token.entry_price = None
+                    token.active_strategy = None
 
                 await self.dispatcher.send(token, signal, reason)
                 self.logs.append(
@@ -511,7 +465,7 @@ class MonitorService:
                         ts=datetime.now(timezone.utc),
                         symbol=token.symbol,
                         address=token.address,
-                        strategy=STATE_STRATEGY[token.confirmed_state],
+                        strategy=token.active_strategy or StrategyName.SELL_ONLY,
                         signal=Signal.HOLD,
                         reason=f"tick error: {exc}",
                     )
@@ -535,7 +489,7 @@ class MonitorService:
                 ts=datetime.now(timezone.utc),
                 symbol=token.symbol,
                 address=token.address,
-                strategy=STATE_STRATEGY[token.confirmed_state],
+                strategy=token.active_strategy or StrategyName.SELL_ONLY,
                 signal=Signal.SELL if too_low_fdv or too_old else Signal.HOLD,
                 reason="白名单移除并加入黑名单",
             )
