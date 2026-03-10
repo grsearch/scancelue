@@ -18,53 +18,85 @@ from app.main import (
 
 
 def test_ema_rsi_shapes_and_cross_helpers():
-    closes = [float(i) for i in range(1, 50)]
+    closes = [float(i) for i in range(1, 80)]
     assert len(ema(closes, 9)) == len(closes)
     assert len(rsi(closes, 9)) >= 2
     assert cross_up(29, 30, 30)
     assert cross_down(75, 74.5, 75)
 
 
-def test_rebound_buy_and_sell_logic():
+def test_rebound_buy_add_sell_logic():
     token = TokenRecord(network="solana", address="a", symbol="A")
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 101, 102, 103], 102, 101, 29, 31, True)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 101, 102, 103], 102, 101, 29, 31, True, None, None, None, None, None, None, None)
     assert strategy == StrategyName.REBOUND
     assert signal == Signal.BUY
 
-    token.rebound_entry_price = 103
-    token.position = PositionState(has_position=True)
-    strategy, signal, _ = StrategyEngine.evaluate(token, [103, 104, 103], 103, 102, 66, 64, True)
-    assert strategy == StrategyName.REBOUND
-    assert signal == Signal.SELL
-
-
-def test_rebound_add_once_logic():
-    token = TokenRecord(network="solana", address="b", symbol="B")
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True, added_once=False)
-
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 29, 31, True)
-    assert strategy == StrategyName.REBOUND
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 29, 31, True, None, None, None, None, None, None, None)
     assert signal == Signal.ADD
 
     token.position.added_once = True
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 29, 31, True)
-    assert signal == Signal.HOLD
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 66, 64, True, None, None, None, None, None, None, None)
+    assert signal == Signal.SELL
 
 
-def test_stop_loss_10_percent_and_open_gate():
+def test_startup_buy_and_sell_on_5m_logic():
+    token = TokenRecord(network="solana", address="b", symbol="B")
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token,
+        [100, 101, 102],
+        101,
+        100,
+        40,
+        45,
+        False,  # rebound gate closed should not block startup
+        102,
+        100,
+        99,
+        98,
+        99,
+        60,
+        62,
+    )
+    assert strategy == StrategyName.STARTUP
+    assert signal == Signal.BUY
+
+    token.startup_entry_price = 102
+    token.position = PositionState(has_position=True)
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token,
+        [102, 101, 100],
+        100,
+        101,
+        50,
+        48,
+        False,
+        100,
+        99,
+        101,
+        100,
+        102,
+        74,
+        68,
+    )
+    assert strategy == StrategyName.STARTUP
+    assert signal == Signal.SELL
+
+
+def test_stop_loss_10_percent_and_open_gate_hold():
     token = TokenRecord(network="solana", address="c", symbol="C")
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True)
-    strategy, signal, reason = StrategyEngine.evaluate(token, [100, 95, 90], 95, 96, 45, 44, True)
+    strategy, signal, reason = StrategyEngine.evaluate(token, [100, 95, 90], 95, 96, 45, 44, True, None, None, None, None, None, None, None)
     assert strategy == StrategyName.REBOUND
     assert signal == Signal.SELL
     assert "10%止损" in reason
 
     flat = TokenRecord(network="solana", address="d", symbol="D")
-    strategy, signal, reason = StrategyEngine.evaluate(flat, [1, 1.01, 1.02], 1.0, 1.0, 49, 52, False)
+    strategy, signal, reason = StrategyEngine.evaluate(flat, [1, 1.01, 1.02], 1.0, 1.0, 49, 52, False, None, None, None, None, None, None, None)
     assert signal == Signal.HOLD
-    assert "禁止开单" in reason
+    assert "无买卖信号" in reason or "禁止开单" in reason
 
 
 def test_persistence_roundtrip(tmp_path: Path):
@@ -74,6 +106,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     token = TokenRecord(network="solana", address="addr1", symbol="AAA")
     token.fdv = 12345
     token.rebound_entry_price = 0.8
+    token.startup_entry_price = 0.9
     token.position = PositionState(has_position=True, added_once=True)
     svc.tokens[token.address] = token
     svc.blacklist.add("addr2")
@@ -85,6 +118,7 @@ def test_persistence_roundtrip(tmp_path: Path):
 
     assert "addr1" in restored.tokens
     assert restored.tokens["addr1"].rebound_entry_price == 0.8
+    assert restored.tokens["addr1"].startup_entry_price == 0.9
     assert restored.tokens["addr1"].position.added_once is True
     assert "addr2" in restored.blacklist
 

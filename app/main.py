@@ -50,6 +50,7 @@ class MarketState(str, Enum):
 
 class StrategyName(str, Enum):
     REBOUND = "rebound_strategy"
+    STARTUP = "startup_strategy"
     SELL_ONLY = "sell_only"
 
 
@@ -61,8 +62,8 @@ class Signal(str, Enum):
 
 
 STATE_STRATEGY = {
-    MarketState.PRE_TREND: StrategyName.REBOUND,
-    MarketState.TREND: StrategyName.REBOUND,
+    MarketState.PRE_TREND: StrategyName.STARTUP,
+    MarketState.TREND: StrategyName.STARTUP,
     MarketState.RANGE: StrategyName.REBOUND,
     MarketState.DOWN: StrategyName.SELL_ONLY,
 }
@@ -89,6 +90,7 @@ class TokenRecord:
     position: PositionState = field(default_factory=PositionState)
     last_rsi: float | None = None
     rebound_entry_price: float | None = None
+    startup_entry_price: float | None = None
 
 
 @dataclass
@@ -238,32 +240,50 @@ class StrategyEngine:
     @staticmethod
     def evaluate(
         token: TokenRecord,
-        closes: list[float],
-        ema9: float,
-        ema20: float,
-        rsi_prev: float,
-        rsi_now: float,
-        allow_open: bool,
+        closes_1m: list[float],
+        ema9_1m: float,
+        ema20_1m: float,
+        rsi1_prev: float,
+        rsi1_now: float,
+        allow_open_rebound: bool,
+        close_5m: float | None,
+        ema9_5m: float | None,
+        ema20_5m: float | None,
+        ema9_5m_prev: float | None,
+        ema20_5m_prev: float | None,
+        rsi5_prev: float | None,
+        rsi5_now: float | None,
     ) -> tuple[StrategyName, Signal, str]:
-        close = closes[-1]
+        close_1m = closes_1m[-1]
         has_rebound = token.rebound_entry_price is not None
+        has_startup = token.startup_entry_price is not None
 
+        # manage existing positions first (sell/add)
         if has_rebound:
-            entry = token.rebound_entry_price or close
-            if close <= entry * 0.90:
+            entry = token.rebound_entry_price or close_1m
+            if close_1m <= entry * 0.90:
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略触发10%止损"
-            if rsi_now >= 85 or cross_down(rsi_prev, rsi_now, 75) or cross_down(rsi_prev, rsi_now, 65):
+            if rsi1_now >= 85 or cross_down(rsi1_prev, rsi1_now, 75) or cross_down(rsi1_prev, rsi1_now, 65):
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI回落/过热"
-            if allow_open and (not token.position.added_once) and cross_up(rsi_prev, rsi_now, 30) and close <= entry * 0.90:
+            if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
                 return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30且价格<=首仓90%"
-            return StrategyName.REBOUND, Signal.HOLD, "反弹策略持仓中"
 
-        if not allow_open:
-            return StrategyName.REBOUND, Signal.HOLD, "5分钟EMA9<=EMA20，禁止开单"
+        if has_startup and None not in (ema9_5m, ema20_5m, rsi5_prev, rsi5_now):
+            entry = token.startup_entry_price or close_1m
+            if close_1m <= entry * 0.90:
+                return StrategyName.STARTUP, Signal.SELL, "启动策略触发10%止损"
+            if (ema9_5m < ema20_5m) or (rsi5_now >= 85) or cross_down(rsi5_prev, rsi5_now, 70):
+                return StrategyName.STARTUP, Signal.SELL, "启动策略卖出：EMA死叉或RSI条件触发"
 
-        rebound_buy = cross_up(rsi_prev, rsi_now, 30)
-        if rebound_buy:
+        # new entries
+        if allow_open_rebound and (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
+
+        startup_ready = None not in (close_5m, ema9_5m, ema20_5m, ema9_5m_prev, ema20_5m_prev)
+        if startup_ready and (not has_startup):
+            startup_buy = (ema9_5m_prev <= ema20_5m_prev and ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.02)
+            if startup_buy:
+                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：5分钟EMA9上穿EMA20"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -314,6 +334,7 @@ class MonitorService:
             },
             "last_rsi": token.last_rsi,
             "rebound_entry_price": token.rebound_entry_price,
+            "startup_entry_price": token.startup_entry_price,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -344,6 +365,7 @@ class MonitorService:
             ),
             last_rsi=payload.get("last_rsi"),
             rebound_entry_price=payload.get("rebound_entry_price"),
+            startup_entry_price=payload.get("startup_entry_price"),
         )
 
     def save_state(self) -> None:
@@ -430,27 +452,57 @@ class MonitorService:
                 close = closes[-1]
                 rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
 
-                # Use 1m data resampled to 5m closes for open-gate filter
+                # Use 1m data resampled to 5m closes
                 closes_5m = [closes[i] for i in range(4, len(closes), 5)]
-                allow_open = False
-                if len(closes_5m) >= 20:
-                    ema9_5m = ema(closes_5m, 9)[-1]
-                    ema20_5m = ema(closes_5m, 20)[-1]
-                    allow_open = ema9_5m > ema20_5m
+                ema9_5m = ema20_5m = ema9_5m_prev = ema20_5m_prev = None
+                rsi5_prev = rsi5_now = None
+                close_5m = closes_5m[-1] if closes_5m else None
+                allow_open_rebound = False
+                if len(closes_5m) >= 21:
+                    ema9_5m_vals = ema(closes_5m, 9)
+                    ema20_5m_vals = ema(closes_5m, 20)
+                    ema9_5m = ema9_5m_vals[-1]
+                    ema20_5m = ema20_5m_vals[-1]
+                    ema9_5m_prev = ema9_5m_vals[-2]
+                    ema20_5m_prev = ema20_5m_vals[-2]
+                    allow_open_rebound = ema9_5m > ema20_5m
+                    rsi5_vals = rsi(closes_5m, 9)
+                    if len(rsi5_vals) >= 2:
+                        rsi5_prev, rsi5_now = rsi5_vals[-2], rsi5_vals[-1]
 
-                strategy, signal, reason = self.engine.evaluate(token, closes, ema9_now, ema20_now, rsi_prev, rsi_now, allow_open)
+                strategy, signal, reason = self.engine.evaluate(
+                    token,
+                    closes,
+                    ema9_now,
+                    ema20_now,
+                    rsi_prev,
+                    rsi_now,
+                    allow_open_rebound,
+                    close_5m,
+                    ema9_5m,
+                    ema20_5m,
+                    ema9_5m_prev,
+                    ema20_5m_prev,
+                    rsi5_prev,
+                    rsi5_now,
+                )
 
                 if signal == Signal.BUY:
-                    if token.rebound_entry_price is None:
+                    if strategy == StrategyName.REBOUND and token.rebound_entry_price is None:
                         token.rebound_entry_price = close
-                    token.position.has_position = True
+                    elif strategy == StrategyName.STARTUP and token.startup_entry_price is None:
+                        token.startup_entry_price = close_5m or close
+                    token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
                 elif signal == Signal.ADD:
                     token.position.has_position = True
                     token.position.added_once = True
                 elif signal == Signal.SELL:
-                    token.rebound_entry_price = None
-                    token.position.has_position = False
-                    token.position.added_once = False
+                    if strategy == StrategyName.REBOUND:
+                        token.rebound_entry_price = None
+                        token.position.added_once = False
+                    elif strategy == StrategyName.STARTUP:
+                        token.startup_entry_price = None
+                    token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
 
                 await self.dispatcher.send(token, signal, reason)
                 self.logs.append(
@@ -485,10 +537,11 @@ class MonitorService:
             too_old = (datetime.now(timezone.utc) - token.pool_created_at).total_seconds() > 48 * 3600
         if not (too_low_fdv or too_old):
             return
-        if token.rebound_entry_price is not None:
+        if token.rebound_entry_price is not None or token.startup_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
             token.position = PositionState()
             token.rebound_entry_price = None
+            token.startup_entry_price = None
         self.tokens.pop(token.address, None)
         self.blacklist.add(token.address)
         self.logs.append(
