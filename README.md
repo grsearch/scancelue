@@ -46,7 +46,7 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 - 开单前过滤（5m）：`EMA9 > EMA20`，否则禁止反弹策略开新单。
 - 买入：`RSI 上穿 30`。
 - 加仓（仅一次）：在已有反弹仓位下，且满足 5m 开单条件，`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.90`。
-- 卖出：`RSI 下穿 70` 或 `RSI 下穿 75` 或 `RSI >= 85` 或 `5m close < EMA9`。
+- 卖出：`RSI 下穿 70` 或 `RSI 下穿 75` 或 `RSI >= 85` 或 `5m EMA9 < EMA20`。
 
 ### 启动策略（5分钟）
 - 买入：第1根5m出现 `ema_cross_up = (ema9_prev <= ema20_prev and ema9_now > ema20_now)` 后，仅在第2~3根5m内允许买入一次，且需满足 `EMA9 > EMA20`、`close > EMA9`、`close <= EMA9 * 1.05`，并且第2/3根不能连续收跌（不能同时出现 `close_2 < close_1` 且 `close_3 < close_2`）。
