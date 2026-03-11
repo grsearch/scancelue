@@ -29,7 +29,7 @@ def test_rebound_buy_add_sell_and_stoploss_logic():
     token = TokenRecord(network="solana", address="a", symbol="A")
 
     strategy, signal, _ = StrategyEngine.evaluate(
-        token, [100, 101, 102], 102, 101, 29, 31, True,
+        token, [100, 101, 102], 102, 101, 34, 36, True,
         None, None, None, None, None, None, None, None,
     )
     assert strategy == StrategyName.REBOUND
@@ -38,7 +38,7 @@ def test_rebound_buy_add_sell_and_stoploss_logic():
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True, added_once=False)
     strategy, signal, _ = StrategyEngine.evaluate(
-        token, [100, 95, 90], 92, 91, 29, 31, True,
+        token, [100, 95, 90], 92, 91, 34, 36, True,
         None, None, None, None, None, None, None, None,
     )
     assert signal == Signal.ADD
