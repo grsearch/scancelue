@@ -277,49 +277,22 @@ class StrategyEngine:
     ) -> tuple[StrategyName, Signal, str]:
         close_1m = closes_1m[-1]
         has_rebound = token.rebound_entry_price is not None
-        has_startup = token.startup_entry_price is not None
 
-        # manage existing positions first (sell/add)
         if has_rebound:
             entry = token.rebound_entry_price or close_1m
             if (
-                rsi1_now >= 85
+                close_1m <= entry * 0.70
+                or rsi1_now >= 85
                 or cross_down(rsi1_prev, rsi1_now, 75)
                 or cross_down(rsi1_prev, rsi1_now, 70)
-                or (ema9_5m is not None and ema20_5m is not None and ema9_5m < ema20_5m)
+                or cross_down(rsi1_prev, rsi1_now, 65)
             ):
-                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿70/75、过热或5分钟EMA9<EMA20"
-            if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
+                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、过热或跌破首仓70%"
+            if (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
                 return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30且价格<=首仓90%"
 
-        if has_startup and None not in (ema9_5m, ema20_5m, ema9_5m_prev, ema20_5m_prev, close_5m):
-            ema_cross_down = ema9_5m_prev >= ema20_5m_prev and ema9_5m < ema20_5m
-            if ema_cross_down or (close_5m < ema9_5m):
-                return StrategyName.STARTUP, Signal.SELL, "启动策略卖出：EMA9下穿EMA20或close<EMA9"
-
-        # new entries
-        if allow_open_rebound and (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
+        if (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
-
-        startup_ready = None not in (close_5m, ema9_5m, ema20_5m, ema9_5m_prev, ema20_5m_prev)
-        if startup_ready and startup_bucket is not None:
-            ema_cross_up = ema9_5m_prev <= ema20_5m_prev and ema9_5m > ema20_5m
-            if ema_cross_up:
-                token.startup_last_cross_bucket = startup_bucket
-
-        if startup_ready and (not has_startup) and startup_bucket is not None:
-            offset = None
-            if token.startup_last_cross_bucket is not None:
-                offset = startup_bucket - token.startup_last_cross_bucket
-            # only allow entry on the 2nd~3rd 5m bars after cross (offset 1 or 2)
-            recent_cross_ok = offset in (1, 2)
-            startup_state_ok = ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.05
-            consecutive_drop_block = False
-            if offset == 2 and close_5m_prev is not None and close_5m_prev2 is not None:
-                consecutive_drop_block = (close_5m_prev < close_5m_prev2) and (close_5m < close_5m_prev)
-            cross_not_consumed = token.startup_last_entry_cross_bucket != token.startup_last_cross_bucket
-            if recent_cross_ok and startup_state_ok and (not consecutive_drop_block) and token.startup_last_buy_bucket != startup_bucket and cross_not_consumed:
-                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：上穿后第2~3根且非连续收跌（同一上穿仅一次）"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -517,6 +490,10 @@ class MonitorService:
                     if len(rsi5_vals) >= 2:
                         rsi5_prev, rsi5_now = rsi5_vals[-2], rsi5_vals[-1]
 
+                # single-strategy mode: ignore legacy startup position state
+                if token.startup_entry_price is not None:
+                    token.startup_entry_price = None
+
                 strategy, signal, reason = self.engine.evaluate(
                     token,
                     closes,
@@ -538,23 +515,16 @@ class MonitorService:
                 )
 
                 if signal == Signal.BUY:
-                    if strategy == StrategyName.REBOUND and token.rebound_entry_price is None:
+                    if token.rebound_entry_price is None:
                         token.rebound_entry_price = close
-                    elif strategy == StrategyName.STARTUP and token.startup_entry_price is None:
-                        token.startup_entry_price = close_5m or close
-                        token.startup_last_buy_bucket = startup_bucket
-                        token.startup_last_entry_cross_bucket = token.startup_last_cross_bucket
-                    token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
+                    token.position.has_position = token.rebound_entry_price is not None
                 elif signal == Signal.ADD:
                     token.position.has_position = True
                     token.position.added_once = True
                 elif signal == Signal.SELL:
-                    if strategy == StrategyName.REBOUND:
-                        token.rebound_entry_price = None
-                        token.position.added_once = False
-                    elif strategy == StrategyName.STARTUP:
-                        token.startup_entry_price = None
-                    token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
+                    token.rebound_entry_price = None
+                    token.position.added_once = False
+                    token.position.has_position = False
 
                 await self.dispatcher.send(token, signal, reason)
                 self.logs.append(
