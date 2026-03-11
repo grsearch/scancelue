@@ -53,7 +53,7 @@ def test_rebound_buy_add_sell_logic():
     strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 66, 64, True, None, None, None, None, None, None, None, None, None)
     assert signal == Signal.SELL
 
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 99, 98], 98, 97, 45, 46, True, 98, 101, 100, 99, 100, 50, 49, 10)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 99, 98], 98, 97, 45, 46, True, 98, 101, 95, 99, 94, 50, 49, 10)
     assert signal == Signal.SELL
 
 
