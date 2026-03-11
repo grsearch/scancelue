@@ -30,7 +30,7 @@ def test_rebound_buy_add_sell_and_stoploss_logic():
     token = TokenRecord(network="solana", address="a", symbol="A")
 
     strategy, signal, _ = StrategyEngine.evaluate(
-        token, [100, 101, 102], 102, 101, 34, 36, True,
+        token, [100, 101, 102], 102, 101, 29, 31, True,
         None, None, None, None, None, None, None, None,
     )
     assert strategy == StrategyName.REBOUND
@@ -39,7 +39,7 @@ def test_rebound_buy_add_sell_and_stoploss_logic():
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True, added_once=False)
     strategy, signal, _ = StrategyEngine.evaluate(
-        token, [100, 95, 90], 92, 91, 34, 36, True,
+        token, [100, 95, 90], 92, 91, 29, 31, True,
         None, None, None, None, None, None, None, None,
     )
     assert signal == Signal.ADD
@@ -63,7 +63,7 @@ def test_rebound_buy_add_sell_and_stoploss_logic():
 def test_rebound_open_gate_blocks_buy_and_add_when_5m_not_ready():
     token = TokenRecord(network="solana", address="g", symbol="G")
     strategy, signal, reason = StrategyEngine.evaluate(
-        token, [100, 101, 102], 102, 101, 34, 36, False,
+        token, [100, 101, 102], 102, 101, 29, 31, False,
         None, None, None, None, None, None, None, None,
     )
     assert strategy == StrategyName.REBOUND
@@ -73,7 +73,7 @@ def test_rebound_open_gate_blocks_buy_and_add_when_5m_not_ready():
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True, added_once=False)
     strategy, signal, _ = StrategyEngine.evaluate(
-        token, [100, 95, 90], 92, 91, 34, 36, False,
+        token, [100, 95, 90], 92, 91, 29, 31, False,
         None, None, None, None, None, None, None, None,
     )
     assert signal == Signal.HOLD
