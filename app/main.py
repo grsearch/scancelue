@@ -284,10 +284,10 @@ class StrategyEngine:
             if (
                 rsi1_now >= 85
                 or cross_down(rsi1_prev, rsi1_now, 75)
-                or cross_down(rsi1_prev, rsi1_now, 65)
+                or cross_down(rsi1_prev, rsi1_now, 70)
                 or (close_5m is not None and ema9_5m is not None and close_5m < ema9_5m)
             ):
-                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI回落/过热或5分钟close<EMA9"
+                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿70/75、过热或5分钟close<EMA9"
             if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
                 return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30且价格<=首仓90%"
 
