@@ -129,6 +129,44 @@ def test_startup_buy_and_sell_on_5m_logic():
     assert signal == Signal.SELL
 
 
+
+def test_startup_no_reentry_in_same_cross_after_stopout():
+    token = TokenRecord(network="solana", address="z", symbol="Z")
+
+    # cross bar
+    StrategyEngine.evaluate(
+        token, [100, 101, 102], 101, 100, 40, 45, False,
+        102, 100, 99, 98, 99, 60, 62, 400, 101, 100,
+    )
+
+    # bar2 buy
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token, [101, 102, 103], 102, 101, 45, 48, False,
+        103, 101, 100, 100, 99, 62, 64, 401, 102, 101,
+    )
+    assert strategy == StrategyName.STARTUP and signal == Signal.BUY
+
+    # simulate runtime bookkeeping after BUY
+    token.startup_entry_price = 103
+    token.startup_last_buy_bucket = 401
+    token.startup_last_entry_cross_bucket = token.startup_last_cross_bucket
+
+    # stop out on next bar
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token, [103, 101, 99], 100, 101, 50, 46, False,
+        99, 100, 101, 101, 100, 60, 55, 402, 100, 102,
+    )
+    assert signal == Signal.SELL
+
+    # flat again but still same cross episode: should NOT re-buy
+    token.startup_entry_price = None
+    token.position = PositionState(has_position=False)
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token, [100, 101, 102], 101, 100, 48, 50, False,
+        102, 101, 100, 100, 99, 58, 60, 402, 100, 101,
+    )
+    assert signal == Signal.HOLD
+
 def test_open_gate_hold_without_stoploss():
     token = TokenRecord(network="solana", address="c", symbol="C")
     token.rebound_entry_price = 100
@@ -152,6 +190,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     token.rebound_entry_price = 0.8
     token.startup_entry_price = 0.9
     token.startup_last_cross_bucket = 777
+    token.startup_last_entry_cross_bucket = 776
     token.position = PositionState(has_position=True, added_once=True)
     svc.tokens[token.address] = token
     svc.blacklist.add("addr2")
@@ -165,6 +204,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     assert restored.tokens["addr1"].rebound_entry_price == 0.8
     assert restored.tokens["addr1"].startup_entry_price == 0.9
     assert restored.tokens["addr1"].startup_last_cross_bucket == 777
+    assert restored.tokens["addr1"].startup_last_entry_cross_bucket == 776
     assert restored.tokens["addr1"].position.added_once is True
     assert "addr2" in restored.blacklist
 

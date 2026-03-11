@@ -93,6 +93,7 @@ class TokenRecord:
     startup_entry_price: float | None = None
     startup_last_buy_bucket: int | None = None
     startup_last_cross_bucket: int | None = None
+    startup_last_entry_cross_bucket: int | None = None
 
 
 @dataclass
@@ -316,8 +317,9 @@ class StrategyEngine:
             consecutive_drop_block = False
             if offset == 2 and close_5m_prev is not None and close_5m_prev2 is not None:
                 consecutive_drop_block = (close_5m_prev < close_5m_prev2) and (close_5m < close_5m_prev)
-            if recent_cross_ok and startup_state_ok and (not consecutive_drop_block) and token.startup_last_buy_bucket != startup_bucket:
-                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：上穿后第2~3根且非连续收跌"
+            cross_not_consumed = token.startup_last_entry_cross_bucket != token.startup_last_cross_bucket
+            if recent_cross_ok and startup_state_ok and (not consecutive_drop_block) and token.startup_last_buy_bucket != startup_bucket and cross_not_consumed:
+                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：上穿后第2~3根且非连续收跌（同一上穿仅一次）"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -372,6 +374,7 @@ class MonitorService:
             "startup_entry_price": token.startup_entry_price,
             "startup_last_buy_bucket": token.startup_last_buy_bucket,
             "startup_last_cross_bucket": token.startup_last_cross_bucket,
+            "startup_last_entry_cross_bucket": token.startup_last_entry_cross_bucket,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -405,6 +408,7 @@ class MonitorService:
             startup_entry_price=payload.get("startup_entry_price"),
             startup_last_buy_bucket=payload.get("startup_last_buy_bucket"),
             startup_last_cross_bucket=payload.get("startup_last_cross_bucket"),
+            startup_last_entry_cross_bucket=payload.get("startup_last_entry_cross_bucket"),
         )
 
     def save_state(self) -> None:
@@ -539,6 +543,7 @@ class MonitorService:
                     elif strategy == StrategyName.STARTUP and token.startup_entry_price is None:
                         token.startup_entry_price = close_5m or close
                         token.startup_last_buy_bucket = startup_bucket
+                        token.startup_last_entry_cross_bucket = token.startup_last_cross_bucket
                     token.position.has_position = token.rebound_entry_price is not None or token.startup_entry_price is not None
                 elif signal == Signal.ADD:
                     token.position.has_position = True
