@@ -570,7 +570,7 @@ class MonitorService:
         too_low_fdv = token.fdv is not None and token.fdv < 20000
         too_old = False
         if token.pool_created_at:
-            too_old = (datetime.now(timezone.utc) - token.pool_created_at).total_seconds() > 48 * 3600
+            too_old = (datetime.now(timezone.utc) - token.pool_created_at).total_seconds() > 24 * 3600
         if not (too_low_fdv or too_old):
             return
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:

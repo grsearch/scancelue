@@ -10,7 +10,7 @@
   - SELL -> `POST /force-sell`
 - 白名单退出条件：
   - FDV < 20000
-  - 池年龄 > 48h（以 pool_created_at 为准）
+  - 池年龄 > 24h（以 pool_created_at 为准）
   - 若退出时仍有持仓，则先发送 SELL webhook，再移入黑名单。
 - 提供 Dashboard：`GET /dashboard`（含当前盈亏与历史总盈亏）
 - 白名单/黑名单与信号日志会持久化到本地文件，服务重启后自动恢复。
