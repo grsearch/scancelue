@@ -90,6 +90,7 @@ class TokenRecord:
     position: PositionState = field(default_factory=PositionState)
     last_rsi: float | None = None
     rebound_entry_price: float | None = None
+    rebound_add_entry_price: float | None = None
     startup_entry_price: float | None = None
     startup_last_buy_bucket: int | None = None
     startup_last_cross_bucket: int | None = None
@@ -344,6 +345,7 @@ class MonitorService:
             },
             "last_rsi": token.last_rsi,
             "rebound_entry_price": token.rebound_entry_price,
+            "rebound_add_entry_price": token.rebound_add_entry_price,
             "startup_entry_price": token.startup_entry_price,
             "startup_last_buy_bucket": token.startup_last_buy_bucket,
             "startup_last_cross_bucket": token.startup_last_cross_bucket,
@@ -378,6 +380,7 @@ class MonitorService:
             ),
             last_rsi=payload.get("last_rsi"),
             rebound_entry_price=payload.get("rebound_entry_price"),
+            rebound_add_entry_price=payload.get("rebound_add_entry_price"),
             startup_entry_price=payload.get("startup_entry_price"),
             startup_last_buy_bucket=payload.get("startup_last_buy_bucket"),
             startup_last_cross_bucket=payload.get("startup_last_cross_bucket"),
@@ -521,8 +524,11 @@ class MonitorService:
                 elif signal == Signal.ADD:
                     token.position.has_position = True
                     token.position.added_once = True
+                    if token.rebound_add_entry_price is None:
+                        token.rebound_add_entry_price = close
                 elif signal == Signal.SELL:
                     token.rebound_entry_price = None
+                    token.rebound_add_entry_price = None
                     token.position.added_once = False
                     token.position.has_position = False
 
@@ -563,6 +569,7 @@ class MonitorService:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
             token.position = PositionState()
             token.rebound_entry_price = None
+            token.rebound_add_entry_price = None
             token.startup_entry_price = None
         self.tokens.pop(token.address, None)
         self.blacklist.add(token.address)
@@ -611,6 +618,15 @@ async def dashboard(request: Request) -> HTMLResponse:
     now = datetime.now(timezone.utc)
     tokens = []
     for t in service.tokens.values():
+        pnl_text = "N/A"
+        if t.price and t.price > 0 and t.rebound_entry_price and t.rebound_entry_price > 0:
+            legs = [t.rebound_entry_price]
+            if t.rebound_add_entry_price and t.rebound_add_entry_price > 0:
+                legs.append(t.rebound_add_entry_price)
+            pnl_sol = sum((t.price / entry) - 1.0 for entry in legs)
+            invested_sol = float(len(legs))
+            pnl_pct = (pnl_sol / invested_sol) * 100 if invested_sol > 0 else 0.0
+            pnl_text = f"{pnl_sol:+.3f} SOL ({pnl_pct:+.2f}%)"
         tokens.append(
             {
                 "symbol": t.symbol,
@@ -618,6 +634,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "fdv": f"{(t.fdv or 0):,.0f}",
                 "address": t.address,
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                "pnl": pnl_text,
             }
         )
     logs = [
