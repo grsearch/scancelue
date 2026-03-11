@@ -79,6 +79,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     token.fdv = 12345
     token.rebound_entry_price = 0.8
     token.rebound_add_entry_price = 0.6
+    token.realized_pnl_sol = 1.23
     token.position = PositionState(has_position=True, added_once=True)
     svc.tokens[token.address] = token
     svc.blacklist.add("addr2")
@@ -91,6 +92,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     assert "addr1" in restored.tokens
     assert restored.tokens["addr1"].rebound_entry_price == 0.8
     assert restored.tokens["addr1"].rebound_add_entry_price == 0.6
+    assert restored.tokens["addr1"].realized_pnl_sol == 1.23
     assert restored.tokens["addr1"].position.added_once is True
     assert "addr2" in restored.blacklist
 

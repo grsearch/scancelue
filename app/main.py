@@ -91,6 +91,7 @@ class TokenRecord:
     last_rsi: float | None = None
     rebound_entry_price: float | None = None
     rebound_add_entry_price: float | None = None
+    realized_pnl_sol: float = 0.0
     startup_entry_price: float | None = None
     startup_last_buy_bucket: int | None = None
     startup_last_cross_bucket: int | None = None
@@ -346,6 +347,7 @@ class MonitorService:
             "last_rsi": token.last_rsi,
             "rebound_entry_price": token.rebound_entry_price,
             "rebound_add_entry_price": token.rebound_add_entry_price,
+            "realized_pnl_sol": token.realized_pnl_sol,
             "startup_entry_price": token.startup_entry_price,
             "startup_last_buy_bucket": token.startup_last_buy_bucket,
             "startup_last_cross_bucket": token.startup_last_cross_bucket,
@@ -381,6 +383,7 @@ class MonitorService:
             last_rsi=payload.get("last_rsi"),
             rebound_entry_price=payload.get("rebound_entry_price"),
             rebound_add_entry_price=payload.get("rebound_add_entry_price"),
+            realized_pnl_sol=float(payload.get("realized_pnl_sol", 0.0) or 0.0),
             startup_entry_price=payload.get("startup_entry_price"),
             startup_last_buy_bucket=payload.get("startup_last_buy_bucket"),
             startup_last_cross_bucket=payload.get("startup_last_cross_bucket"),
@@ -527,6 +530,11 @@ class MonitorService:
                     if token.rebound_add_entry_price is None:
                         token.rebound_add_entry_price = close
                 elif signal == Signal.SELL:
+                    if close > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
+                        legs = [token.rebound_entry_price]
+                        if token.rebound_add_entry_price and token.rebound_add_entry_price > 0:
+                            legs.append(token.rebound_add_entry_price)
+                        token.realized_pnl_sol += sum((close / entry) - 1.0 for entry in legs)
                     token.rebound_entry_price = None
                     token.rebound_add_entry_price = None
                     token.position.added_once = False
@@ -567,6 +575,11 @@ class MonitorService:
             return
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
+            if token.price and token.price > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
+                legs = [token.rebound_entry_price]
+                if token.rebound_add_entry_price and token.rebound_add_entry_price > 0:
+                    legs.append(token.rebound_add_entry_price)
+                token.realized_pnl_sol += sum((token.price / entry) - 1.0 for entry in legs)
             token.position = PositionState()
             token.rebound_entry_price = None
             token.rebound_add_entry_price = None
@@ -618,15 +631,20 @@ async def dashboard(request: Request) -> HTMLResponse:
     now = datetime.now(timezone.utc)
     tokens = []
     for t in service.tokens.values():
-        pnl_text = "N/A"
+        current_pnl_sol = 0.0
+        current_pnl_text = "N/A"
         if t.price and t.price > 0 and t.rebound_entry_price and t.rebound_entry_price > 0:
             legs = [t.rebound_entry_price]
             if t.rebound_add_entry_price and t.rebound_add_entry_price > 0:
                 legs.append(t.rebound_add_entry_price)
-            pnl_sol = sum((t.price / entry) - 1.0 for entry in legs)
+            current_pnl_sol = sum((t.price / entry) - 1.0 for entry in legs)
             invested_sol = float(len(legs))
-            pnl_pct = (pnl_sol / invested_sol) * 100 if invested_sol > 0 else 0.0
-            pnl_text = f"{pnl_sol:+.3f} SOL ({pnl_pct:+.2f}%)"
+            pnl_pct = (current_pnl_sol / invested_sol) * 100 if invested_sol > 0 else 0.0
+            current_pnl_text = f"{current_pnl_sol:+.3f} SOL ({pnl_pct:+.2f}%)"
+
+        total_pnl_sol = t.realized_pnl_sol + current_pnl_sol
+        total_pnl_text = f"{total_pnl_sol:+.3f} SOL"
+
         tokens.append(
             {
                 "symbol": t.symbol,
@@ -634,7 +652,8 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "fdv": f"{(t.fdv or 0):,.0f}",
                 "address": t.address,
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
-                "pnl": pnl_text,
+                "pnl": current_pnl_text,
+                "total_pnl": total_pnl_text,
             }
         )
     logs = [

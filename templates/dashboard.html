@@ -23,7 +23,7 @@
       <h2>白名单监控代币</h2>
       <table>
         <thead>
-          <tr><th>Symbol</th><th>AGE</th><th>FDV</th><th>盈亏(1 SOL首仓 + 1 SOL加仓)</th><th>合约地址</th></tr>
+          <tr><th>Symbol</th><th>AGE</th><th>FDV</th><th>当前盈亏(1+1 SOL)</th><th>历史总盈亏</th><th>合约地址</th></tr>
         </thead>
         <tbody>
           {% for t in tokens %}
@@ -32,10 +32,11 @@
             <td>{{ t.age }}</td>
             <td>{{ t.fdv }}</td>
             <td>{{ t.pnl }}</td>
+            <td>{{ t.total_pnl }}</td>
             <td><a href="{{ t.gmgn }}" target="_blank">{{ t.address }}</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="5">暂无监控代币</td></tr>
+          <tr><td colspan="6">暂无监控代币</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -57,7 +58,7 @@
             <td>{{ l.reason }}</td>
           </tr>
           {% else %}
-          <tr><td colspan="5">暂无信号记录</td></tr>
+          <tr><td colspan="6">暂无信号记录</td></tr>
           {% endfor %}
         </tbody>
       </table>
