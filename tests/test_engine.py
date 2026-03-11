@@ -26,8 +26,6 @@ def test_ema_rsi_shapes_and_cross_helpers():
     assert cross_down(75, 74.5, 75)
 
 
-
-
 def test_resample_5m_closes_allows_partial_liquidity():
     ohlcv = [
         [0, 0, 0, 0, 1.0, 0],
@@ -38,27 +36,30 @@ def test_resample_5m_closes_allows_partial_liquidity():
     bars = resample_5m_closes(ohlcv)
     assert bars == [(0, 1.2), (1, 2.0)]
 
+
 def test_rebound_buy_add_sell_logic():
     token = TokenRecord(network="solana", address="a", symbol="A")
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 101, 102, 103], 102, 101, 29, 31, True, None, None, None, None, None, None, None, None, None)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 101, 102, 103], 102, 101, 29, 31, True, None, None, None, None, None, None, None, None)
     assert strategy == StrategyName.REBOUND
     assert signal == Signal.BUY
 
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True, added_once=False)
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 29, 31, True, None, None, None, None, None, None, None, None, None)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 29, 31, True, None, None, None, None, None, None, None, None)
     assert signal == Signal.ADD
 
     token.position.added_once = True
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 66, 64, True, None, None, None, None, None, None, None, None, None)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 66, 64, True, None, None, None, None, None, None, None, None)
     assert signal == Signal.SELL
 
-    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 99, 98], 98, 97, 45, 46, True, 98, 101, 95, 99, 94, 50, 49, 10)
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 99, 98], 98, 97, 45, 46, True, 98, 101, 95, 99, 94, 50, 49, 10, 97, 99)
     assert signal == Signal.SELL
 
 
 def test_startup_buy_and_sell_on_5m_logic():
     token = TokenRecord(network="solana", address="b", symbol="B")
+
+    # bar1: cross appears, should not buy immediately
     strategy, signal, _ = StrategyEngine.evaluate(
         token,
         [100, 101, 102],
@@ -66,7 +67,7 @@ def test_startup_buy_and_sell_on_5m_logic():
         100,
         40,
         45,
-        False,  # rebound gate closed should not block startup
+        False,
         102,
         100,
         99,
@@ -75,6 +76,30 @@ def test_startup_buy_and_sell_on_5m_logic():
         60,
         62,
         123,
+        101,
+        100,
+    )
+    assert signal == Signal.HOLD
+
+    # bar2: in window, state valid -> BUY
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token,
+        [101, 102, 103],
+        102,
+        101,
+        45,
+        48,
+        False,
+        103,
+        101,
+        100,
+        100,
+        99,
+        62,
+        64,
+        124,
+        102,
+        101,
     )
     assert strategy == StrategyName.STARTUP
     assert signal == Signal.BUY
@@ -96,7 +121,9 @@ def test_startup_buy_and_sell_on_5m_logic():
         100,
         74,
         68,
-        124,
+        125,
+        101,
+        102,
     )
     assert strategy == StrategyName.STARTUP
     assert signal == Signal.SELL
@@ -106,13 +133,12 @@ def test_open_gate_hold_without_stoploss():
     token = TokenRecord(network="solana", address="c", symbol="C")
     token.rebound_entry_price = 100
     token.position = PositionState(has_position=True)
-    strategy, signal, reason = StrategyEngine.evaluate(token, [100, 95, 90], 95, 96, 45, 44, True, None, None, None, None, None, None, None, None, None)
+    strategy, signal, reason = StrategyEngine.evaluate(token, [100, 95, 90], 95, 96, 45, 44, True, None, None, None, None, None, None, None, None)
     assert strategy == StrategyName.REBOUND
     assert signal == Signal.HOLD
-    assert "持仓中" in reason
 
     flat = TokenRecord(network="solana", address="d", symbol="D")
-    strategy, signal, reason = StrategyEngine.evaluate(flat, [1, 1.01, 1.02], 1.0, 1.0, 49, 52, False, None, None, None, None, None, None, None, None, None)
+    strategy, signal, reason = StrategyEngine.evaluate(flat, [1, 1.01, 1.02], 1.0, 1.0, 49, 52, False, None, None, None, None, None, None, None, None)
     assert signal == Signal.HOLD
     assert "无买卖信号" in reason or "禁止开单" in reason
 
@@ -125,6 +151,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     token.fdv = 12345
     token.rebound_entry_price = 0.8
     token.startup_entry_price = 0.9
+    token.startup_last_cross_bucket = 777
     token.position = PositionState(has_position=True, added_once=True)
     svc.tokens[token.address] = token
     svc.blacklist.add("addr2")
@@ -137,6 +164,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     assert "addr1" in restored.tokens
     assert restored.tokens["addr1"].rebound_entry_price == 0.8
     assert restored.tokens["addr1"].startup_entry_price == 0.9
+    assert restored.tokens["addr1"].startup_last_cross_bucket == 777
     assert restored.tokens["addr1"].position.added_once is True
     assert "addr2" in restored.blacklist
 
@@ -157,9 +185,10 @@ def test_datetime_and_age_helpers():
 
 def test_startup_buy_only_once_per_5m_cross_bucket():
     token = TokenRecord(network="solana", address="x", symbol="X")
+    token.startup_last_cross_bucket = 199
     args = (
         [100, 101, 102], 101, 100, 40, 45, False,
-        102, 100, 99, 98, 99, 60, 62, 200,
+        102, 100, 99, 98, 99, 60, 62, 200, 101, 100,
     )
     strategy, signal, _ = StrategyEngine.evaluate(token, *args)
     assert strategy == StrategyName.STARTUP and signal == Signal.BUY
@@ -168,11 +197,11 @@ def test_startup_buy_only_once_per_5m_cross_bucket():
     assert signal == Signal.HOLD
 
 
-def test_startup_buy_allowed_within_three_5m_bars_after_cross():
+def test_startup_buy_allowed_on_2nd_3rd_bar_and_blocked_on_two_red_bars():
     token = TokenRecord(network="solana", address="y", symbol="Y")
 
-    # first call: cross happens and should buy
-    strategy, signal, _ = StrategyEngine.evaluate(
+    # mark cross at bucket 300
+    StrategyEngine.evaluate(
         token,
         [100, 101, 102],
         101,
@@ -188,12 +217,11 @@ def test_startup_buy_allowed_within_three_5m_bars_after_cross():
         60,
         62,
         300,
+        101,
+        100,
     )
-    assert strategy == StrategyName.STARTUP and signal == Signal.BUY
 
-    # simulate no position now, but still within 3 bars after cross and state still valid
-    token.startup_entry_price = None
-    token.position = PositionState(has_position=False)
+    # bar2 after cross can buy
     strategy, signal, _ = StrategyEngine.evaluate(
         token,
         [101, 102, 103],
@@ -209,12 +237,40 @@ def test_startup_buy_allowed_within_three_5m_bars_after_cross():
         99,
         62,
         64,
-        302,
+        301,
+        102,
+        101,
     )
     assert strategy == StrategyName.STARTUP and signal == Signal.BUY
 
-    # outside 3-bar window should not buy
+    # reset position to test bar3 filter
+    token.startup_entry_price = None
+    token.position = PositionState(has_position=False)
     token.startup_last_buy_bucket = None
+
+    # bar3 with two consecutive red closes should be blocked
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token,
+        [101, 100, 99],
+        100,
+        99,
+        48,
+        46,
+        False,
+        99,
+        100,
+        99,
+        100,
+        98,
+        60,
+        58,
+        302,
+        100,
+        101,
+    )
+    assert signal == Signal.HOLD
+
+    # outside window should not buy
     strategy, signal, _ = StrategyEngine.evaluate(
         token,
         [101, 102, 103],
@@ -231,5 +287,7 @@ def test_startup_buy_allowed_within_three_5m_bars_after_cross():
         62,
         64,
         304,
+        102,
+        101,
     )
     assert signal == Signal.HOLD

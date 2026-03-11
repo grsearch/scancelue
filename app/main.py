@@ -271,6 +271,8 @@ class StrategyEngine:
         rsi5_prev: float | None,
         rsi5_now: float | None,
         startup_bucket: int | None,
+        close_5m_prev: float | None = None,
+        close_5m_prev2: float | None = None,
     ) -> tuple[StrategyName, Signal, str]:
         close_1m = closes_1m[-1]
         has_rebound = token.rebound_entry_price is not None
@@ -305,13 +307,17 @@ class StrategyEngine:
                 token.startup_last_cross_bucket = startup_bucket
 
         if startup_ready and (not has_startup) and startup_bucket is not None:
-            recent_cross_ok = (
-                token.startup_last_cross_bucket is not None
-                and 0 <= (startup_bucket - token.startup_last_cross_bucket) <= 2
-            )
+            offset = None
+            if token.startup_last_cross_bucket is not None:
+                offset = startup_bucket - token.startup_last_cross_bucket
+            # only allow entry on the 2nd~3rd 5m bars after cross (offset 1 or 2)
+            recent_cross_ok = offset in (1, 2)
             startup_state_ok = ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.05
-            if recent_cross_ok and startup_state_ok and token.startup_last_buy_bucket != startup_bucket:
-                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：上穿后3根5m内且状态保持"
+            consecutive_drop_block = False
+            if offset == 2 and close_5m_prev is not None and close_5m_prev2 is not None:
+                consecutive_drop_block = (close_5m_prev < close_5m_prev2) and (close_5m < close_5m_prev)
+            if recent_cross_ok and startup_state_ok and (not consecutive_drop_block) and token.startup_last_buy_bucket != startup_bucket:
+                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：上穿后第2~3根且非连续收跌"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -492,6 +498,8 @@ class MonitorService:
                 ema9_5m = ema20_5m = ema9_5m_prev = ema20_5m_prev = None
                 rsi5_prev = rsi5_now = None
                 close_5m = closes_5m[-1] if closes_5m else None
+                close_5m_prev = closes_5m[-2] if len(closes_5m) >= 2 else None
+                close_5m_prev2 = closes_5m[-3] if len(closes_5m) >= 3 else None
                 allow_open_rebound = False
                 if len(closes_5m) >= 21:
                     ema9_5m_vals = ema(closes_5m, 9)
@@ -521,6 +529,8 @@ class MonitorService:
                     rsi5_prev,
                     rsi5_now,
                     startup_bucket,
+                    close_5m_prev,
+                    close_5m_prev2,
                 )
 
                 if signal == Signal.BUY:
