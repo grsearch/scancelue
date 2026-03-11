@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.main import (
@@ -129,3 +130,28 @@ def test_datetime_and_age_helpers():
 
     added = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
     assert format_pool_age(None, now, added) == "1.00h"
+
+
+def test_whitelist_exit_uses_added_at_when_pool_created_at_missing():
+    svc = MonitorService()
+
+    class _DummyDispatcher:
+        async def send(self, token, signal, reason):
+            return None
+
+    svc.dispatcher = _DummyDispatcher()
+
+    token = TokenRecord(
+        network="solana",
+        address="old_token",
+        symbol="OLD",
+        added_at=datetime.now(timezone.utc).replace(microsecond=0),
+    )
+    token.added_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    svc.tokens[token.address] = token
+
+    asyncio.run(svc._handle_whitelist_exit(token))
+
+    assert token.address in svc.blacklist
+    assert token.address not in svc.tokens
+
