@@ -13,6 +13,7 @@ from app.main import (
     ema,
     format_pool_age,
     parse_cg_datetime,
+    resample_5m_closes,
     rsi,
 )
 
@@ -24,6 +25,18 @@ def test_ema_rsi_shapes_and_cross_helpers():
     assert cross_up(29, 30, 30)
     assert cross_down(75, 74.5, 75)
 
+
+
+
+def test_resample_5m_closes_allows_partial_liquidity():
+    ohlcv = [
+        [0, 0, 0, 0, 1.0, 0],
+        [60, 0, 0, 0, 1.1, 0],
+        [120, 0, 0, 0, 1.2, 0],
+        [300, 0, 0, 0, 2.0, 0],
+    ]
+    bars = resample_5m_closes(ohlcv)
+    assert bars == [(0, 1.2), (1, 2.0)]
 
 def test_rebound_buy_add_sell_logic():
     token = TokenRecord(network="solana", address="a", symbol="A")
@@ -152,4 +165,71 @@ def test_startup_buy_only_once_per_5m_cross_bucket():
     assert strategy == StrategyName.STARTUP and signal == Signal.BUY
     token.startup_last_buy_bucket = 200
     strategy, signal, _ = StrategyEngine.evaluate(token, *args)
+    assert signal == Signal.HOLD
+
+
+def test_startup_buy_allowed_within_three_5m_bars_after_cross():
+    token = TokenRecord(network="solana", address="y", symbol="Y")
+
+    # first call: cross happens and should buy
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token,
+        [100, 101, 102],
+        101,
+        100,
+        40,
+        45,
+        False,
+        102,
+        100,
+        99,
+        98,
+        99,
+        60,
+        62,
+        300,
+    )
+    assert strategy == StrategyName.STARTUP and signal == Signal.BUY
+
+    # simulate no position now, but still within 3 bars after cross and state still valid
+    token.startup_entry_price = None
+    token.position = PositionState(has_position=False)
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token,
+        [101, 102, 103],
+        102,
+        101,
+        45,
+        48,
+        False,
+        103,
+        101,
+        100,
+        100,
+        99,
+        62,
+        64,
+        302,
+    )
+    assert strategy == StrategyName.STARTUP and signal == Signal.BUY
+
+    # outside 3-bar window should not buy
+    token.startup_last_buy_bucket = None
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token,
+        [101, 102, 103],
+        102,
+        101,
+        45,
+        48,
+        False,
+        103,
+        101,
+        100,
+        100,
+        99,
+        62,
+        64,
+        304,
+    )
     assert signal == Signal.HOLD

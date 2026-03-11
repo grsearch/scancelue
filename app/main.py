@@ -92,6 +92,7 @@ class TokenRecord:
     rebound_entry_price: float | None = None
     startup_entry_price: float | None = None
     startup_last_buy_bucket: int | None = None
+    startup_last_cross_bucket: int | None = None
 
 
 @dataclass
@@ -246,7 +247,8 @@ def resample_5m_closes(ohlcv: list[list[float]]) -> list[tuple[int, float]]:
         buckets.setdefault(bucket, []).append(close)
     out: list[tuple[int, float]] = []
     for b in sorted(buckets):
-        if len(buckets[b]) >= 5:
+        # liquidity-tolerant mode: keep 5m bucket even if fewer than 5x1m bars arrived
+        if buckets[b]:
             out.append((b, buckets[b][-1]))
     return out
 
@@ -297,10 +299,19 @@ class StrategyEngine:
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
 
         startup_ready = None not in (close_5m, ema9_5m, ema20_5m, ema9_5m_prev, ema20_5m_prev)
-        if startup_ready and (not has_startup):
-            startup_buy = (ema9_5m_prev <= ema20_5m_prev and ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.05)
-            if startup_buy and startup_bucket is not None and token.startup_last_buy_bucket != startup_bucket:
-                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：5分钟EMA9上穿EMA20"
+        if startup_ready and startup_bucket is not None:
+            ema_cross_up = ema9_5m_prev <= ema20_5m_prev and ema9_5m > ema20_5m
+            if ema_cross_up:
+                token.startup_last_cross_bucket = startup_bucket
+
+        if startup_ready and (not has_startup) and startup_bucket is not None:
+            recent_cross_ok = (
+                token.startup_last_cross_bucket is not None
+                and 0 <= (startup_bucket - token.startup_last_cross_bucket) <= 2
+            )
+            startup_state_ok = ema9_5m > ema20_5m and close_5m > ema9_5m and close_5m <= ema9_5m * 1.05
+            if recent_cross_ok and startup_state_ok and token.startup_last_buy_bucket != startup_bucket:
+                return StrategyName.STARTUP, Signal.BUY, "启动策略买入：上穿后3根5m内且状态保持"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -354,6 +365,7 @@ class MonitorService:
             "rebound_entry_price": token.rebound_entry_price,
             "startup_entry_price": token.startup_entry_price,
             "startup_last_buy_bucket": token.startup_last_buy_bucket,
+            "startup_last_cross_bucket": token.startup_last_cross_bucket,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -386,6 +398,7 @@ class MonitorService:
             rebound_entry_price=payload.get("rebound_entry_price"),
             startup_entry_price=payload.get("startup_entry_price"),
             startup_last_buy_bucket=payload.get("startup_last_buy_bucket"),
+            startup_last_cross_bucket=payload.get("startup_last_cross_bucket"),
         )
 
     def save_state(self) -> None:
