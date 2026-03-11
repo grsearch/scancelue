@@ -40,6 +40,9 @@ def test_rebound_buy_add_sell_logic():
     strategy, signal, _ = StrategyEngine.evaluate(token, [100, 95, 90], 92, 91, 66, 64, True, None, None, None, None, None, None, None, None, None)
     assert signal == Signal.SELL
 
+    strategy, signal, _ = StrategyEngine.evaluate(token, [100, 99, 98], 98, 97, 45, 46, True, 98, 99, 100, 99, 100, 50, 49, 10)
+    assert signal == Signal.SELL
+
 
 def test_startup_buy_and_sell_on_5m_logic():
     token = TokenRecord(network="solana", address="b", symbol="B")
@@ -134,6 +137,9 @@ def test_datetime_and_age_helpers():
     created = datetime(2026, 1, 1, 10, 30, tzinfo=timezone.utc)
     assert format_pool_age(created, now) == "1.50h"
     assert format_pool_age(None, now) == "N/A"
+
+    added = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
+    assert format_pool_age(None, now, added) == "1.00h"
 
 
 def test_startup_buy_only_once_per_5m_cross_bucket():

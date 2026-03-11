@@ -277,8 +277,13 @@ class StrategyEngine:
         # manage existing positions first (sell/add)
         if has_rebound:
             entry = token.rebound_entry_price or close_1m
-            if rsi1_now >= 85 or cross_down(rsi1_prev, rsi1_now, 75) or cross_down(rsi1_prev, rsi1_now, 65):
-                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI回落/过热"
+            if (
+                rsi1_now >= 85
+                or cross_down(rsi1_prev, rsi1_now, 75)
+                or cross_down(rsi1_prev, rsi1_now, 65)
+                or (ema9_5m is not None and ema20_5m is not None and ema9_5m < ema20_5m)
+            ):
+                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI回落/过热或5分钟EMA9<EMA20"
             if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
                 return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30且价格<=首仓90%"
 
@@ -300,12 +305,13 @@ class StrategyEngine:
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
 
-def format_pool_age(pool_created_at: datetime | None, now: datetime | None = None) -> str:
-    """Dashboard AGE uses pool creation age from CoinGecko pool_created_at."""
-    if pool_created_at is None:
+def format_pool_age(pool_created_at: datetime | None, now: datetime | None = None, added_at: datetime | None = None) -> str:
+    """Dashboard AGE prefers pool_created_at; falls back to whitelist added_at before metadata is ready."""
+    base = pool_created_at or added_at
+    if base is None:
         return "N/A"
     now = now or datetime.now(timezone.utc)
-    age_h = (now - pool_created_at).total_seconds() / 3600
+    age_h = (now - base).total_seconds() / 3600
     if age_h < 0:
         return "0.00h"
     return f"{age_h:.2f}h"
@@ -610,7 +616,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         tokens.append(
             {
                 "symbol": t.symbol,
-                "age": format_pool_age(t.pool_created_at, now),
+                "age": format_pool_age(t.pool_created_at, now, t.added_at),
                 "fdv": f"{(t.fdv or 0):,.0f}",
                 "address": t.address,
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
