@@ -187,23 +187,31 @@ def test_backtest_strategy5_ema_cross_buy_sell():
     assert res.trades >= 2
 
 
-def test_backtest_strategy6_uses_1m_cross_for_entry_under_5m_gate():
+def test_backtest_strategy6_ema_cross_runs_without_5m_gate():
     base_ts = 1_700_000_000
-    # 前段上升用于建立 5m EMA9 > EMA20，后段制造一次 1m EMA9 上穿 EMA20
-    closes = [100 + i * 0.15 for i in range(110)] + [113.0, 112.0, 111.0, 112.5, 114.5, 116.0, 114.0, 111.0, 109.0]
-    ohlcv = []
-    for i, c in enumerate(closes):
-        ts = base_ts + i * 60
-        ohlcv.append([ts, c, c, c, c, 1000])
+    # 策略6无5m门槛，使用EMA交叉，可在数据内产生交易
+    cfg = BacktestConfig(name="策略6", require_5m_gate=False, use_stop70=False, use_ema_cross=True)
+    assert res.trades >= 1
+def test_backtest_strategy6_takes_profit_at_40_percent():
+    # 先形成EMA上穿开仓，再快速拉升超过40%触发止盈
+    closes = [100.0] * 30 + [95.0, 92.0, 94.0, 98.0, 105.0, 120.0, 135.0, 145.0, 142.0]
 
-    cfg = BacktestConfig(name="策略6", require_5m_gate=True, use_stop70=False, use_ema_cross=True)
+    cfg = BacktestConfig(
+        name="策略6",
+        require_5m_gate=False,
+        use_stop70=False,
+        use_ema_cross=True,
+        take_profit_pct=0.40,
+        overbought_rsi=80.0,
+    )
     res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
 
     assert res.strategy == "策略6"
     assert res.trades >= 1
+    assert res.realized_pnl_sol > 0
 
 
-def test_backtest_configs_include_strategy6_with_5m_gate():
+def test_backtest_configs_include_strategy6_rules():
     names = [cfg.name for cfg in BACKTEST_CONFIGS]
     assert "策略6" in names
 
@@ -212,4 +220,6 @@ def test_backtest_configs_include_strategy6_with_5m_gate():
     assert cfg5.use_ema_cross is True
     assert cfg6.use_ema_cross is True
     assert cfg5.require_5m_gate is False
-    assert cfg6.require_5m_gate is True
+    assert cfg6.require_5m_gate is False
+    assert cfg6.take_profit_pct == 0.40
+    assert cfg6.overbought_rsi == 80.0

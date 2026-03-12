@@ -364,6 +364,8 @@ class BacktestConfig:
     require_5m_gate: bool
     use_stop70: bool
     use_ema_cross: bool = False
+    take_profit_pct: float | None = None
+    overbought_rsi: float = 85.0
 
 
 @dataclass
@@ -381,7 +383,14 @@ BACKTEST_CONFIGS = [
     BacktestConfig(name="策略3", require_5m_gate=False, use_stop70=False),
     BacktestConfig(name="策略4", require_5m_gate=False, use_stop70=True),
     BacktestConfig(name="策略5", require_5m_gate=False, use_stop70=False, use_ema_cross=True),
-]
+    BacktestConfig(
+        name="策略6",
+        require_5m_gate=False,
+        use_stop70=False,
+        use_ema_cross=True,
+        take_profit_pct=0.40,
+        overbought_rsi=80.0,
+    ),
 
 
 def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, now_ts: int | None = None) -> BacktestResult:
@@ -440,10 +449,16 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
 
         if has_pos:
             if config.use_ema_cross:
+                profit_hit = (
+                    config.take_profit_pct is not None
+                    and first_entry is not None
+                    and first_entry > 0
+                    and close_now >= first_entry * (1.0 + config.take_profit_pct)
+                )
                 sell = (
                     (ema9_prev >= ema20_prev and ema9_now < ema20_now)
-                    or cross_down(rsi_prev, rsi_now, 75)
-                    or rsi_now >= 85
+                    or profit_hit
+                    or rsi_now >= config.overbought_rsi
                 )
             else:
                 sell = (
