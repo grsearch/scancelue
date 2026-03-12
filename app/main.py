@@ -433,8 +433,8 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
             if bucket not in ema5_map:
                 allow_open = False
             else:
-                ema9_now, ema20_now = ema5_map[bucket]
-                allow_open = ema9_now > ema20_now
+                gate_ema9, gate_ema20 = ema5_map[bucket]
+                allow_open = gate_ema9 > gate_ema20
 
         has_pos = first_entry is not None
 
