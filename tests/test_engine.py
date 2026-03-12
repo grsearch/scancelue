@@ -3,11 +3,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.main import (
+    BacktestConfig,
     MonitorService,
     PositionState,
     Signal,
     StrategyEngine,
     StrategyName,
+    run_rebound_backtest_24h,
     TokenRecord,
     cross_down,
     cross_up,
@@ -148,4 +150,23 @@ def test_whitelist_exit_uses_added_at_when_pool_created_at_missing():
 
     assert token.address in svc.blacklist
     assert token.address not in svc.tokens
+
+
+
+def test_backtest_module_runs_and_returns_metrics():
+    base_ts = 1_700_000_000
+    closes = [100.0] * 25 + [92.0, 88.0, 85.0, 83.0, 81.0, 84.0, 88.0, 93.0, 99.0, 105.0, 98.0, 90.0, 80.0, 72.0, 68.0, 70.0, 73.0]
+    ohlcv = []
+    for i, c in enumerate(closes):
+        ts = base_ts + i * 60
+        ohlcv.append([ts, c, c, c, c, 1000])
+
+    cfg = BacktestConfig(name="策略X", require_5m_gate=False, use_stop70=True)
+    res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
+
+    assert res.strategy == "策略X"
+    assert isinstance(res.total_pnl_sol, float)
+    assert isinstance(res.realized_pnl_sol, float)
+    assert isinstance(res.unrealized_pnl_sol, float)
+    assert isinstance(res.trades, int)
 

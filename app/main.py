@@ -119,10 +119,10 @@ class GeckoClient:
         self.base = os.getenv("COINGECKO_BASE_URL", "https://pro-api.coingecko.com/api/v3/onchain")
         self.api_key = os.getenv("COINGECKO_API_KEY", "")
 
-    async def fetch_ohlcv(self, network: str, token: str, timeframe: str = "minute") -> list[list[float]]:
-        # We request up to 200 bars for EMA20/RSI9 stability.
+    async def fetch_ohlcv(self, network: str, token: str, timeframe: str = "minute", limit: int = 200) -> list[list[float]]:
+        # Default 200 bars for runtime; backtest may request larger window.
         url = f"{self.base}/networks/{network}/tokens/{token}/ohlcv/{timeframe}"
-        params = {"limit": 200}
+        params = {"limit": limit}
         headers = {"x-cg-pro-api-key": self.api_key} if self.api_key else {}
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(url, params=params, headers=headers)
@@ -300,6 +300,127 @@ class StrategyEngine:
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
+
+
+@dataclass
+class BacktestConfig:
+    name: str
+    require_5m_gate: bool
+    use_stop70: bool
+
+
+@dataclass
+class BacktestResult:
+    strategy: str
+    total_pnl_sol: float
+    realized_pnl_sol: float
+    unrealized_pnl_sol: float
+    trades: int
+
+
+BACKTEST_CONFIGS = [
+    BacktestConfig(name="策略1", require_5m_gate=True, use_stop70=False),
+    BacktestConfig(name="策略2", require_5m_gate=True, use_stop70=True),
+    BacktestConfig(name="策略3", require_5m_gate=False, use_stop70=False),
+    BacktestConfig(name="策略4", require_5m_gate=False, use_stop70=True),
+]
+
+
+def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, now_ts: int | None = None) -> BacktestResult:
+    if len(ohlcv) < 30:
+        return BacktestResult(config.name, 0.0, 0.0, 0.0, 0)
+
+    now_ts = now_ts or int(datetime.now(timezone.utc).timestamp())
+    start_ts = now_ts - 24 * 3600
+
+    closes = [float(c[4]) for c in ohlcv]
+    rsi_vals = rsi(closes, 9)
+    if len(rsi_vals) < 2:
+        return BacktestResult(config.name, 0.0, 0.0, 0.0, 0)
+
+    bars_5m = resample_5m_closes(ohlcv)
+    ema5_map: dict[int, tuple[float, float]] = {}
+    if len(bars_5m) >= 21:
+        closes_5m = [x[1] for x in bars_5m]
+        ema9_5m_vals = ema(closes_5m, 9)
+        ema20_5m_vals = ema(closes_5m, 20)
+        for idx, (bucket, _) in enumerate(bars_5m):
+            if idx >= 20:
+                ema5_map[bucket] = (ema9_5m_vals[idx], ema20_5m_vals[idx])
+
+    first_entry: float | None = None
+    add_entry: float | None = None
+    added_once = False
+    realized = 0.0
+    trades = 0
+
+    for i in range(2, len(ohlcv)):
+        ts = int(float(ohlcv[i][0]))
+        if ts < start_ts:
+            continue
+
+        close_now = float(ohlcv[i][4])
+        rsi_prev = rsi_vals[i - 2]
+        rsi_now = rsi_vals[i - 1]
+
+        allow_open = True
+        if config.require_5m_gate:
+            bucket = ts // 300
+            if bucket not in ema5_map:
+                allow_open = False
+            else:
+                ema9_now, ema20_now = ema5_map[bucket]
+                allow_open = ema9_now > ema20_now
+
+        has_pos = first_entry is not None
+
+        if has_pos:
+            sell = (
+                rsi_now >= 85
+                or cross_down(rsi_prev, rsi_now, 75)
+                or cross_down(rsi_prev, rsi_now, 70)
+                or cross_down(rsi_prev, rsi_now, 65)
+            )
+            if config.use_stop70 and first_entry is not None and close_now <= first_entry * 0.70:
+                sell = True
+
+            if sell and first_entry is not None and first_entry > 0:
+                legs = [first_entry]
+                if add_entry is not None and add_entry > 0:
+                    legs.append(add_entry)
+                realized += sum((close_now / entry) - 1.0 for entry in legs)
+                trades += 1
+                first_entry = None
+                add_entry = None
+                added_once = False
+                continue
+
+            if allow_open and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * 0.90:
+                add_entry = close_now
+                added_once = True
+                continue
+
+        if (not has_pos) and allow_open and cross_up(rsi_prev, rsi_now, 30):
+            first_entry = close_now
+            add_entry = None
+            added_once = False
+
+    unrealized = 0.0
+    if first_entry is not None and first_entry > 0:
+        last_close = float(ohlcv[-1][4])
+        legs = [first_entry]
+        if add_entry is not None and add_entry > 0:
+            legs.append(add_entry)
+        unrealized = sum((last_close / entry) - 1.0 for entry in legs)
+
+    total = realized + unrealized
+    return BacktestResult(
+        strategy=config.name,
+        total_pnl_sol=total,
+        realized_pnl_sol=realized,
+        unrealized_pnl_sol=unrealized,
+        trades=trades,
+    )
 
 def format_pool_age(pool_created_at: datetime | None, now: datetime | None = None, added_at: datetime | None = None) -> str:
     """Dashboard AGE prefers pool_created_at; falls back to whitelist added_at before metadata is ready."""
@@ -668,6 +789,50 @@ async def dashboard(request: Request) -> HTMLResponse:
         for l in reversed(service.logs[-200:])
     ]
     return templates.TemplateResponse("dashboard.html", {"request": request, "tokens": tokens, "logs": logs})
+
+
+@app.get("/dashboard/backtest", response_class=HTMLResponse)
+async def dashboard_backtest(request: Request) -> HTMLResponse:
+    now = datetime.now(timezone.utc)
+    rows: list[dict[str, Any]] = []
+
+    for t in service.tokens.values():
+        try:
+            ohlcv = await service.gecko.fetch_ohlcv(t.network, t.address, timeframe="minute", limit=2000)
+            if len(ohlcv) < 30:
+                continue
+            results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
+            rows.append(
+                {
+                    "symbol": t.symbol,
+                    "age": format_pool_age(t.pool_created_at, now, t.added_at),
+                    "address": t.address,
+                    "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                    "results": [
+                        {
+                            "strategy": r.strategy,
+                            "total": f"{r.total_pnl_sol:+.3f} SOL",
+                            "realized": f"{r.realized_pnl_sol:+.3f} SOL",
+                            "unrealized": f"{r.unrealized_pnl_sol:+.3f} SOL",
+                            "trades": r.trades,
+                        }
+                        for r in results
+                    ],
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "symbol": t.symbol,
+                    "age": format_pool_age(t.pool_created_at, now, t.added_at),
+                    "address": t.address,
+                    "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                    "error": str(exc),
+                    "results": [],
+                }
+            )
+
+    return templates.TemplateResponse("backtest_dashboard.html", {"request": request, "rows": rows})
 
 
 @app.get("/healthz")
