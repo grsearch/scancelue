@@ -342,12 +342,11 @@ class StrategyEngine:
         # AGE < 12h: trend strategy
         if age_h < 12:
             has_trend = token.startup_entry_price is not None
-            if (
+            trend_trigger = (
                 ema9_1m_prev is not None
-                and ema20_1m_prev is not None
-                and cross_up(ema9_1m_prev, ema9_1m, ema20_1m)
-            ):
-                token.startup_last_cross_bucket = 3
+                and ema9_1m >= ema20_1m * 0.995
+                and ema9_1m > ema9_1m_prev
+            )
 
             if has_trend:
                 entry = token.startup_entry_price or close_1m
@@ -367,15 +366,12 @@ class StrategyEngine:
 
                 return StrategyName.STARTUP, Signal.HOLD, "趋势策略HOLD：持仓中"
 
-            if token.startup_last_cross_bucket and token.startup_last_cross_bucket > 0:
-                can_buy = close_1m > ema9_1m and close_1m <= ema9_1m * 1.10 and rsi1_now < 75
-                token.startup_last_cross_bucket -= 1
-                if can_buy:
-                    token.startup_last_cross_bucket = 0
-                    token.startup_last_entry_cross_bucket = 0
-                    return StrategyName.STARTUP, Signal.BUY, "趋势策略买入：上穿后3根K线入场窗口"
+            can_buy = close_1m > ema9_1m and close_1m <= ema9_1m * 1.03 and rsi1_now < 70
+            if trend_trigger and can_buy:
+                token.startup_last_entry_cross_bucket = 0
+                return StrategyName.STARTUP, Signal.BUY, "趋势策略买入：EMA9贴近EMA20并上行，且满足入场条件"
 
-            return StrategyName.STARTUP, Signal.HOLD, "趋势策略HOLD：等待EMA上穿与入场条件"
+            return StrategyName.STARTUP, Signal.HOLD, "趋势策略HOLD：等待触发与入场条件"
 
         # AGE >= 12h: rebound strategy
         has_rebound = token.rebound_entry_price is not None
@@ -447,7 +443,6 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     first_entry: float | None = None
     add_entry: float | None = None
     added_once = False
-    trend_entry_window: int = 0
     trend_alert = False
     realized = 0.0
     trades = 0
@@ -507,8 +502,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                 added_once = False
 
         elif config.mode == "trend":
-            if cross_up(ema9_prev, ema9_now, ema20_now):
-                trend_entry_window = 3
+            trend_trigger = ema9_now >= ema20_now * 0.995 and ema9_now > ema9_prev
 
             if has_pos:
                 if rsi_now >= 80 or cross_down(rsi_prev, rsi_now, 70):
@@ -525,17 +519,13 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     add_entry = None
                     added_once = False
                     trend_alert = False
-                    trend_entry_window = 0
                     continue
 
-            if (not has_pos) and trend_entry_window > 0 and close_now > ema9_now and close_now <= ema9_now * 1.10 and rsi_now < 75:
+            if (not has_pos) and trend_trigger and close_now > ema9_now and close_now <= ema9_now * 1.03 and rsi_now < 70:
                 first_entry = close_now
                 add_entry = None
                 added_once = False
                 trend_alert = False
-
-            if trend_entry_window > 0:
-                trend_entry_window -= 1
 
     unrealized = 0.0
     if first_entry is not None and first_entry > 0:

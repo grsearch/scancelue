@@ -45,8 +45,8 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 
 ### 实盘策略（按 AGE 分流）
 - AGE < 12h：执行趋势策略
-  - 买入触发：`EMA9 上穿 EMA20`
-  - 入场窗口：上穿后 3 根K线内，且 `close > EMA9`、`close <= EMA9*1.1`、`RSI < 75`
+  - 买入触发：`EMA9 >= EMA20*0.995` 且 `EMA9 > EMA9_prev`
+  - 入场条件：`close > EMA9`、`close <= EMA9*1.03`、`RSI < 70`
   - 卖出：`EMA9 下穿 EMA20` 后进入警戒；警戒状态 `close <= 首仓 * 0.80` 卖出；或 `RSI 下穿 70`；或 `RSI >= 80`
 - AGE >= 12h：执行反弹策略
   - 买入：`RSI 上穿 30`
@@ -61,7 +61,8 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
   - 加仓（仅一次）：`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.90`
   - 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.70`
 - 趋势策略：
-  - 买入：`EMA9 上穿 EMA20` 后 3 根K线内，且 `close > EMA9`、`close <= EMA9*1.1`、`RSI < 75`
+  - 买入触发：`EMA9 >= EMA20*0.995` 且 `EMA9 > EMA9_prev`
+  - 入场条件：`close > EMA9`、`close <= EMA9*1.03`、`RSI < 70`
   - 卖出：
     - `EMA9 下穿 EMA20` 后进入警戒状态
     - 警戒状态下 `close <= 首仓价 * 0.80` 卖出
