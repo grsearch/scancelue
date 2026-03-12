@@ -119,10 +119,19 @@ class GeckoClient:
         self.base = os.getenv("COINGECKO_BASE_URL", "https://pro-api.coingecko.com/api/v3/onchain")
         self.api_key = os.getenv("COINGECKO_API_KEY", "")
 
-    async def fetch_ohlcv(self, network: str, token: str, timeframe: str = "minute", limit: int = 200) -> list[list[float]]:
+    async def fetch_ohlcv(
+        self,
+        network: str,
+        token: str,
+        timeframe: str = "minute",
+        limit: int = 200,
+        before_timestamp: int | None = None,
+    ) -> list[list[float]]:
         # Default 200 bars for runtime; backtest may request larger window.
         url = f"{self.base}/networks/{network}/tokens/{token}/ohlcv/{timeframe}"
-        params = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit}
+        if before_timestamp is not None:
+            params["before_timestamp"] = before_timestamp
         headers = {"x-cg-pro-api-key": self.api_key} if self.api_key else {}
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(url, params=params, headers=headers)
@@ -146,6 +155,53 @@ class GeckoClient:
             "pool_created_at": attributes.get("pool_created_at"),
             "created_at": attributes.get("created_at"),
         }
+
+
+    async def fetch_ohlcv_24h(self, network: str, token: str) -> list[list[float]]:
+        """Fetch up to ~24h minute bars using paginated requests compatible with endpoint limits."""
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        start_ts = now_ts - 24 * 3600
+
+        all_rows: list[list[float]] = []
+        before_ts: int | None = None
+        # try conservative limits first to avoid 400 limit errors
+        candidate_limits = [1000, 500, 200]
+
+        for _ in range(4):
+            page: list[list[float]] = []
+            last_exc: Exception | None = None
+            for lim in candidate_limits:
+                try:
+                    page = await self.fetch_ohlcv(
+                        network=network,
+                        token=token,
+                        timeframe="minute",
+                        limit=lim,
+                        before_timestamp=before_ts,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:  # degrade limit and retry
+                    last_exc = exc
+                    continue
+
+            if last_exc is not None:
+                raise last_exc
+            if not page:
+                break
+
+            all_rows.extend(page)
+            oldest_ts = int(float(page[0][0]))
+            if oldest_ts <= start_ts:
+                break
+            before_ts = oldest_ts - 1
+
+        # dedupe by ts and keep last 24h
+        dedup: dict[int, list[float]] = {}
+        for row in all_rows:
+            dedup[int(float(row[0]))] = row
+        out = [row for ts, row in sorted(dedup.items()) if ts >= start_ts]
+        return out
 
 
 class SignalDispatcher:
@@ -798,7 +854,7 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
 
     for t in service.tokens.values():
         try:
-            ohlcv = await service.gecko.fetch_ohlcv(t.network, t.address, timeframe="minute", limit=2000)
+            ohlcv = await service.gecko.fetch_ohlcv_24h(t.network, t.address)
             if len(ohlcv) < 30:
                 continue
             results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
