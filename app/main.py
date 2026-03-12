@@ -747,9 +747,9 @@ class MonitorService:
 
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         too_low_fdv = token.fdv is not None and token.fdv < 20000
-        age_base = token.pool_created_at or token.added_at
-        too_old = (datetime.now(timezone.utc) - age_base).total_seconds() > 24 * 3600
-        if not (too_low_fdv or too_old):
+        # age-based auto-exit is paused
+        too_old = False
+        if not too_low_fdv:
             return
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
@@ -770,7 +770,7 @@ class MonitorService:
                 symbol=token.symbol,
                 address=token.address,
                 strategy=StrategyName.SELL_ONLY,
-                signal=Signal.SELL if too_low_fdv or too_old else Signal.HOLD,
+                signal=Signal.SELL if too_low_fdv else Signal.HOLD,
                 reason="白名单移除并加入黑名单",
             )
         )
