@@ -361,11 +361,7 @@ class StrategyEngine:
 @dataclass
 class BacktestConfig:
     name: str
-    require_5m_gate: bool
-    use_stop70: bool
-    use_ema_cross: bool = False
-    take_profit_pct: float | None = None
-    overbought_rsi: float = 85.0
+    mode: str
 
 
 @dataclass
@@ -378,19 +374,8 @@ class BacktestResult:
 
 
 BACKTEST_CONFIGS = [
-    BacktestConfig(name="策略1", require_5m_gate=True, use_stop70=False),
-    BacktestConfig(name="策略2", require_5m_gate=True, use_stop70=True),
-    BacktestConfig(name="策略3", require_5m_gate=False, use_stop70=False),
-    BacktestConfig(name="策略4", require_5m_gate=False, use_stop70=True),
-    BacktestConfig(name="策略5", require_5m_gate=False, use_stop70=False, use_ema_cross=True),
-    BacktestConfig(
-        name="策略6",
-        require_5m_gate=False,
-        use_stop70=False,
-        use_ema_cross=True,
-        take_profit_pct=0.40,
-        overbought_rsi=80.0,
-    ),
+    BacktestConfig(name="反弹策略", mode="rebound"),
+    BacktestConfig(name="趋势策略", mode="trend"),
 
 
 def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, now_ts: int | None = None) -> BacktestResult:
@@ -420,6 +405,8 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     first_entry: float | None = None
     add_entry: float | None = None
     added_once = False
+    trend_entry_window: int = 0
+    trend_alert = False
     realized = 0.0
     trades = 0
 
@@ -436,65 +423,77 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
         ema20_prev = ema20_vals[i - 1]
         ema20_now = ema20_vals[i]
 
-        allow_open = True
-        if config.require_5m_gate:
-            bucket = ts // 300
-            if bucket not in ema5_map:
-                allow_open = False
-            else:
-                gate_ema9, gate_ema20 = ema5_map[bucket]
-                allow_open = gate_ema9 > gate_ema20
+        allow_open_rebound = True
+        bucket = ts // 300
+        if bucket in ema5_map:
+            gate_ema9, gate_ema20 = ema5_map[bucket]
+            allow_open_rebound = gate_ema9 > gate_ema20
+        else:
+            allow_open_rebound = False
 
         has_pos = first_entry is not None
 
-        if has_pos:
-            if config.use_ema_cross:
-                profit_hit = (
-                    config.take_profit_pct is not None
-                    and first_entry is not None
-                    and first_entry > 0
-                    and close_now >= first_entry * (1.0 + config.take_profit_pct)
-                )
-                sell = (
-                    (ema9_prev >= ema20_prev and ema9_now < ema20_now)
-                    or profit_hit
-                    or rsi_now >= config.overbought_rsi
-                )
-            else:
+        if config.mode == "rebound":
+            if has_pos:
                 sell = (
                     rsi_now >= 85
                     or cross_down(rsi_prev, rsi_now, 75)
                     or cross_down(rsi_prev, rsi_now, 70)
                     or cross_down(rsi_prev, rsi_now, 65)
+                    or (first_entry is not None and first_entry > 0 and close_now <= first_entry * 0.70)
                 )
-            if config.use_stop70 and first_entry is not None and close_now <= first_entry * 0.70:
-                sell = True
 
-            if sell and first_entry is not None and first_entry > 0:
-                legs = [first_entry]
-                if add_entry is not None and add_entry > 0:
-                    legs.append(add_entry)
-                realized += sum((close_now / entry) - 1.0 for entry in legs)
-                trades += 1
-                first_entry = None
+                if sell and first_entry is not None and first_entry > 0:
+                    legs = [first_entry]
+                    if add_entry is not None and add_entry > 0:
+                        legs.append(add_entry)
+                    realized += sum((close_now / entry) - 1.0 for entry in legs)
+                    trades += 1
+                    first_entry = None
+                    add_entry = None
+                    added_once = False
+                    continue
+
+                if allow_open_rebound and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * 0.90:
+                    add_entry = close_now
+                    added_once = True
+                    continue
+
+            if (not has_pos) and allow_open_rebound and cross_up(rsi_prev, rsi_now, 30):
+                first_entry = close_now
                 add_entry = None
                 added_once = False
-                continue
 
-            if (not config.use_ema_cross) and allow_open and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * 0.90:
-                add_entry = close_now
-                added_once = True
-                continue
+        elif config.mode == "trend":
+            if cross_up(ema9_prev, ema9_now, ema20_now):
+                trend_entry_window = 3
 
-        if (not has_pos) and allow_open and (
-            cross_up(ema9_prev, ema9_now, ema20_now)
-            if config.use_ema_cross
-            else cross_up(rsi_prev, rsi_now, 30)
-        ):
-            first_entry = close_now
-            add_entry = None
-            added_once = False
-            trades += 1
+            if has_pos:
+                if rsi_now >= 80 or cross_down(rsi_prev, rsi_now, 70):
+                    sell = True
+                else:
+                    if ema9_prev >= ema20_prev and ema9_now < ema20_now:
+                        trend_alert = True
+                    sell = trend_alert and first_entry is not None and first_entry > 0 and close_now <= first_entry * 0.80
+
+                if sell and first_entry is not None and first_entry > 0:
+                    realized += (close_now / first_entry) - 1.0
+                    trades += 1
+                    first_entry = None
+                    add_entry = None
+                    added_once = False
+                    trend_alert = False
+                    trend_entry_window = 0
+                    continue
+
+            if (not has_pos) and trend_entry_window > 0 and close_now > ema9_now and close_now <= ema9_now * 1.10 and rsi_now < 75:
+                first_entry = close_now
+                add_entry = None
+                added_once = False
+                trend_alert = False
+
+            if trend_entry_window > 0:
+                trend_entry_window -= 1
 
     unrealized = 0.0
     if first_entry is not None and first_entry > 0:

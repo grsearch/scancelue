@@ -162,17 +162,17 @@ def test_backtest_module_runs_and_returns_metrics():
         ts = base_ts + i * 60
         ohlcv.append([ts, c, c, c, c, 1000])
 
-    cfg = BacktestConfig(name="策略X", require_5m_gate=False, use_stop70=True)
+    cfg = BacktestConfig(name="反弹策略", mode="rebound")
     res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
 
-    assert res.strategy == "策略X"
+    assert res.strategy == "反弹策略"
     assert isinstance(res.total_pnl_sol, float)
     assert isinstance(res.realized_pnl_sol, float)
     assert isinstance(res.unrealized_pnl_sol, float)
     assert isinstance(res.trades, int)
 
 
-def test_backtest_strategy5_ema_cross_buy_sell():
+def test_backtest_rebound_strategy_add_and_sell():
     base_ts = 1_700_000_000
     closes = [100.0] * 20 + [99.0, 98.0, 99.0, 100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 105.0, 100.0, 96.0, 93.0]
     ohlcv = []
@@ -180,46 +180,28 @@ def test_backtest_strategy5_ema_cross_buy_sell():
         ts = base_ts + i * 60
         ohlcv.append([ts, c, c, c, c, 1000])
 
-    cfg = BacktestConfig(name="策略5", require_5m_gate=False, use_stop70=False, use_ema_cross=True)
+    cfg = BacktestConfig(name="反弹策略", mode="rebound")
     res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
 
-    assert res.strategy == "策略5"
-    assert res.trades >= 2
+    assert res.strategy == "反弹策略"
+    assert res.trades >= 1
 
 
-def test_backtest_strategy6_ema_cross_runs_without_5m_gate():
+def test_backtest_trend_strategy_entry_and_exit():
     base_ts = 1_700_000_000
-    # 策略6无5m门槛，使用EMA交叉，可在数据内产生交易
-    cfg = BacktestConfig(name="策略6", require_5m_gate=False, use_stop70=False, use_ema_cross=True)
-    assert res.trades >= 1
-def test_backtest_strategy6_takes_profit_at_40_percent():
-    # 先形成EMA上穿开仓，再快速拉升超过40%触发止盈
-    closes = [100.0] * 30 + [95.0, 92.0, 94.0, 98.0, 105.0, 120.0, 135.0, 145.0, 142.0]
+    # EMA上穿后3根内满足 close 与 RSI 条件开仓，随后 RSI>=80 卖出
+    closes = [100.0] * 40 + [98.0, 96.0, 97.0, 99.0, 101.0, 104.0, 108.0, 112.0, 116.0, 120.0]
+    cfg = BacktestConfig(name="趋势策略", mode="trend")
+    assert res.strategy == "趋势策略"
 
-    cfg = BacktestConfig(
-        name="策略6",
-        require_5m_gate=False,
-        use_stop70=False,
-        use_ema_cross=True,
-        take_profit_pct=0.40,
-        overbought_rsi=80.0,
-    )
-    res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
-
-    assert res.strategy == "策略6"
-    assert res.trades >= 1
-    assert res.realized_pnl_sol > 0
+def test_backtest_trend_strategy_alert_stop_80_percent():
+    # 先上穿开仓，再下穿进入警戒，最后跌到首仓80%止损
+    closes = [100.0] * 40 + [98.0, 96.0, 97.0, 99.0, 102.0, 103.0, 100.0, 97.0, 92.0, 86.0, 80.0, 78.0]
+    cfg = BacktestConfig(name="趋势策略", mode="trend")
+    assert res.strategy == "趋势策略"
+    assert res.realized_pnl_sol < 0
 
 
-def test_backtest_configs_include_strategy6_rules():
+def test_backtest_configs_include_rebound_and_trend_only():
     names = [cfg.name for cfg in BACKTEST_CONFIGS]
-    assert "策略6" in names
-
-    cfg5 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "策略5")
-    cfg6 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "策略6")
-    assert cfg5.use_ema_cross is True
-    assert cfg6.use_ema_cross is True
-    assert cfg5.require_5m_gate is False
-    assert cfg6.require_5m_gate is False
-    assert cfg6.take_profit_pct == 0.40
-    assert cfg6.overbought_rsi == 80.0
+    assert names == ["反弹策略", "趋势策略"]
