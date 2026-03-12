@@ -26,7 +26,7 @@ def test_ema_rsi_shapes_and_cross_helpers():
     assert cross_down(75, 74.5, 75)
 
 
-def test_rebound_buy_add_sell_and_stoploss_logic():
+def test_rebound_buy_add_sell_logic():
     token = TokenRecord(network="solana", address="a", symbol="A")
 
     strategy, signal, _ = StrategyEngine.evaluate(
@@ -51,12 +51,6 @@ def test_rebound_buy_add_sell_and_stoploss_logic():
     )
     assert signal == Signal.SELL
 
-    # stoploss at 70% of first entry
-    strategy, signal, _ = StrategyEngine.evaluate(
-        token, [100, 80, 69], 80, 85, 45, 44, True,
-        None, None, None, None, None, None, None, None,
-    )
-    assert signal == Signal.SELL
 
 
 
