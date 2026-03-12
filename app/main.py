@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -500,6 +500,77 @@ class MonitorService:
         self.dispatcher = SignalDispatcher()
         self.lock = asyncio.Lock()
         self.state_path = Path(os.getenv("STATE_FILE", "data/state.json"))
+        self.backtest_rows: list[dict[str, Any]] = []
+        self.backtest_last_run: datetime | None = None
+        self.backtest_last_slot_key: str | None = None
+
+    @staticmethod
+    def backtest_slot_key(now: datetime) -> str | None:
+        dt = now.astimezone(timezone.utc)
+        if dt.hour in {0, 6, 12, 18} and dt.minute < 2:
+            return dt.strftime("%Y-%m-%d-%H")
+        return None
+
+    async def run_backtest_cycle(self, now: datetime | None = None) -> None:
+        run_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        rows: list[dict[str, Any]] = []
+        for t in self.tokens.values():
+            try:
+                ohlcv = await self.gecko.fetch_ohlcv_24h(t.network, t.address)
+                if len(ohlcv) < 30:
+                    rows.append(
+                        {
+                            "symbol": t.symbol,
+                            "age": format_pool_age(t.pool_created_at, run_at, t.added_at),
+                            "address": t.address,
+                            "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                            "error": "回测数据不足（少于30根1m K线）",
+                            "results": [],
+                        }
+                    )
+                    continue
+
+                results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
+                rows.append(
+                    {
+                        "symbol": t.symbol,
+                        "age": format_pool_age(t.pool_created_at, run_at, t.added_at),
+                        "address": t.address,
+                        "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                        "results": [
+                            {
+                                "strategy": r.strategy,
+                                "total": f"{r.total_pnl_sol:+.3f} SOL",
+                                "realized": f"{r.realized_pnl_sol:+.3f} SOL",
+                                "unrealized": f"{r.unrealized_pnl_sol:+.3f} SOL",
+                                "trades": r.trades,
+                            }
+                            for r in results
+                        ],
+                    }
+                )
+            except Exception as exc:
+                rows.append(
+                    {
+                        "symbol": t.symbol,
+                        "age": format_pool_age(t.pool_created_at, run_at, t.added_at),
+                        "address": t.address,
+                        "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                        "error": str(exc),
+                        "results": [],
+                    }
+                )
+
+        self.backtest_rows = rows
+        self.backtest_last_run = run_at
+
+    async def maybe_run_scheduled_backtest(self, now: datetime | None = None) -> None:
+        check_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        slot_key = self.backtest_slot_key(check_at)
+        if slot_key is None or self.backtest_last_slot_key == slot_key:
+            return
+        await self.run_backtest_cycle(check_at)
+        self.backtest_last_slot_key = slot_key
 
     @staticmethod
     def _dt_to_str(value: datetime | None) -> str | None:
@@ -789,6 +860,7 @@ async def startup() -> None:
     async def loop() -> None:
         while True:
             await service.tick()
+            await service.maybe_run_scheduled_backtest()
             await asyncio.sleep(60)
 
     asyncio.create_task(loop())
@@ -849,46 +921,29 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 @app.get("/dashboard/backtest", response_class=HTMLResponse)
 async def dashboard_backtest(request: Request) -> HTMLResponse:
-    now = datetime.now(timezone.utc)
-    rows: list[dict[str, Any]] = []
+    if service.backtest_last_run is None:
+        await service.run_backtest_cycle()
 
-    for t in service.tokens.values():
-        try:
-            ohlcv = await service.gecko.fetch_ohlcv_24h(t.network, t.address)
-            if len(ohlcv) < 30:
-                continue
-            results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
-            rows.append(
-                {
-                    "symbol": t.symbol,
-                    "age": format_pool_age(t.pool_created_at, now, t.added_at),
-                    "address": t.address,
-                    "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
-                    "results": [
-                        {
-                            "strategy": r.strategy,
-                            "total": f"{r.total_pnl_sol:+.3f} SOL",
-                            "realized": f"{r.realized_pnl_sol:+.3f} SOL",
-                            "unrealized": f"{r.unrealized_pnl_sol:+.3f} SOL",
-                            "trades": r.trades,
-                        }
-                        for r in results
-                    ],
-                }
-            )
-        except Exception as exc:
-            rows.append(
-                {
-                    "symbol": t.symbol,
-                    "age": format_pool_age(t.pool_created_at, now, t.added_at),
-                    "address": t.address,
-                    "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
-                    "error": str(exc),
-                    "results": [],
-                }
-            )
+    last_run_text = (
+        service.backtest_last_run.strftime("%Y-%m-%d %H:%M:%S UTC")
+        if service.backtest_last_run
+        else "未运行"
+    )
+    next_run_text = "未安排"
+    if service.backtest_last_run:
+        last_utc = service.backtest_last_run.astimezone(timezone.utc)
+        next_run = last_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=6)
+        next_run_text = next_run.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    return templates.TemplateResponse("backtest_dashboard.html", {"request": request, "rows": rows})
+    return templates.TemplateResponse(
+        "backtest_dashboard.html",
+        {
+            "request": request,
+            "rows": service.backtest_rows,
+            "last_run": last_run_text,
+            "next_run": next_run_text,
+        },
+    )
 
 
 @app.get("/healthz")

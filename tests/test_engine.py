@@ -170,3 +170,10 @@ def test_backtest_module_runs_and_returns_metrics():
     assert isinstance(res.unrealized_pnl_sol, float)
     assert isinstance(res.trades, int)
 
+
+def test_backtest_slot_key_schedule():
+    svc = MonitorService()
+    assert svc.backtest_slot_key(datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)) == "2026-01-01-00"
+    assert svc.backtest_slot_key(datetime(2026, 1, 1, 6, 1, tzinfo=timezone.utc)) == "2026-01-01-06"
+    assert svc.backtest_slot_key(datetime(2026, 1, 1, 6, 2, tzinfo=timezone.utc)) is None
+    assert svc.backtest_slot_key(datetime(2026, 1, 1, 5, 59, tzinfo=timezone.utc)) is None
