@@ -13,7 +13,7 @@
   - 池年龄退出机制：已暂停
   - 若退出时仍有持仓，则先发送 SELL webhook，再移入黑名单。
 - 提供 Dashboard：`GET /dashboard`（含当前盈亏与历史总盈亏）
-- `GET /dashboard/backtest`（白名单代币过去24小时回测：策略1~4）
+- `GET /dashboard/backtest`（白名单代币过去24小时回测：策略1~5）
 - 白名单/黑名单与信号日志会持久化到本地文件，服务重启后自动恢复。
 
 ## 快速启动
@@ -56,3 +56,4 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 - 策略2：策略1 + `close <= 首仓价 * 0.70` 止损。
 - 策略3：去掉5m门槛，其余同策略1。
 - 策略4：策略3 + `close <= 首仓价 * 0.70` 止损。
+- 策略5：EMA9上穿EMA20买入；EMA9下穿EMA20或RSI下穿75或RSI>=85卖出。

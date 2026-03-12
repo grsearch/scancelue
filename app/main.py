@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -363,6 +363,7 @@ class BacktestConfig:
     name: str
     require_5m_gate: bool
     use_stop70: bool
+    use_ema_cross: bool = False
 
 
 @dataclass
@@ -379,6 +380,7 @@ BACKTEST_CONFIGS = [
     BacktestConfig(name="策略2", require_5m_gate=True, use_stop70=True),
     BacktestConfig(name="策略3", require_5m_gate=False, use_stop70=False),
     BacktestConfig(name="策略4", require_5m_gate=False, use_stop70=True),
+    BacktestConfig(name="策略5", require_5m_gate=False, use_stop70=False, use_ema_cross=True),
 ]
 
 
@@ -391,6 +393,8 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
 
     closes = [float(c[4]) for c in ohlcv]
     rsi_vals = rsi(closes, 9)
+    ema9_vals = ema(closes, 9)
+    ema20_vals = ema(closes, 20)
     if len(rsi_vals) < 2:
         return BacktestResult(config.name, 0.0, 0.0, 0.0, 0)
 
@@ -418,6 +422,10 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
         close_now = float(ohlcv[i][4])
         rsi_prev = rsi_vals[i - 2]
         rsi_now = rsi_vals[i - 1]
+        ema9_prev = ema9_vals[i - 1]
+        ema9_now = ema9_vals[i]
+        ema20_prev = ema20_vals[i - 1]
+        ema20_now = ema20_vals[i]
 
         allow_open = True
         if config.require_5m_gate:
@@ -431,12 +439,19 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
         has_pos = first_entry is not None
 
         if has_pos:
-            sell = (
-                rsi_now >= 85
-                or cross_down(rsi_prev, rsi_now, 75)
-                or cross_down(rsi_prev, rsi_now, 70)
-                or cross_down(rsi_prev, rsi_now, 65)
-            )
+            if config.use_ema_cross:
+                sell = (
+                    (ema9_prev >= ema20_prev and ema9_now < ema20_now)
+                    or cross_down(rsi_prev, rsi_now, 75)
+                    or rsi_now >= 85
+                )
+            else:
+                sell = (
+                    rsi_now >= 85
+                    or cross_down(rsi_prev, rsi_now, 75)
+                    or cross_down(rsi_prev, rsi_now, 70)
+                    or cross_down(rsi_prev, rsi_now, 65)
+                )
             if config.use_stop70 and first_entry is not None and close_now <= first_entry * 0.70:
                 sell = True
 
@@ -451,15 +466,20 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                 added_once = False
                 continue
 
-            if allow_open and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * 0.90:
+            if (not config.use_ema_cross) and allow_open and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * 0.90:
                 add_entry = close_now
                 added_once = True
                 continue
 
-        if (not has_pos) and allow_open and cross_up(rsi_prev, rsi_now, 30):
+        if (not has_pos) and allow_open and (
+            cross_up(ema9_prev, ema9_now, ema20_now)
+            if config.use_ema_cross
+            else cross_up(rsi_prev, rsi_now, 30)
+        ):
             first_entry = close_now
             add_entry = None
             added_once = False
+            trades += 1
 
     unrealized = 0.0
     if first_entry is not None and first_entry > 0:
@@ -500,77 +520,6 @@ class MonitorService:
         self.dispatcher = SignalDispatcher()
         self.lock = asyncio.Lock()
         self.state_path = Path(os.getenv("STATE_FILE", "data/state.json"))
-        self.backtest_rows: list[dict[str, Any]] = []
-        self.backtest_last_run: datetime | None = None
-        self.backtest_last_slot_key: str | None = None
-
-    @staticmethod
-    def backtest_slot_key(now: datetime) -> str | None:
-        dt = now.astimezone(timezone.utc)
-        if dt.hour in {0, 6, 12, 18} and dt.minute < 2:
-            return dt.strftime("%Y-%m-%d-%H")
-        return None
-
-    async def run_backtest_cycle(self, now: datetime | None = None) -> None:
-        run_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        rows: list[dict[str, Any]] = []
-        for t in self.tokens.values():
-            try:
-                ohlcv = await self.gecko.fetch_ohlcv_24h(t.network, t.address)
-                if len(ohlcv) < 30:
-                    rows.append(
-                        {
-                            "symbol": t.symbol,
-                            "age": format_pool_age(t.pool_created_at, run_at, t.added_at),
-                            "address": t.address,
-                            "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
-                            "error": "回测数据不足（少于30根1m K线）",
-                            "results": [],
-                        }
-                    )
-                    continue
-
-                results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
-                rows.append(
-                    {
-                        "symbol": t.symbol,
-                        "age": format_pool_age(t.pool_created_at, run_at, t.added_at),
-                        "address": t.address,
-                        "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
-                        "results": [
-                            {
-                                "strategy": r.strategy,
-                                "total": f"{r.total_pnl_sol:+.3f} SOL",
-                                "realized": f"{r.realized_pnl_sol:+.3f} SOL",
-                                "unrealized": f"{r.unrealized_pnl_sol:+.3f} SOL",
-                                "trades": r.trades,
-                            }
-                            for r in results
-                        ],
-                    }
-                )
-            except Exception as exc:
-                rows.append(
-                    {
-                        "symbol": t.symbol,
-                        "age": format_pool_age(t.pool_created_at, run_at, t.added_at),
-                        "address": t.address,
-                        "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
-                        "error": str(exc),
-                        "results": [],
-                    }
-                )
-
-        self.backtest_rows = rows
-        self.backtest_last_run = run_at
-
-    async def maybe_run_scheduled_backtest(self, now: datetime | None = None) -> None:
-        check_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        slot_key = self.backtest_slot_key(check_at)
-        if slot_key is None or self.backtest_last_slot_key == slot_key:
-            return
-        await self.run_backtest_cycle(check_at)
-        self.backtest_last_slot_key = slot_key
 
     @staticmethod
     def _dt_to_str(value: datetime | None) -> str | None:
@@ -860,7 +809,6 @@ async def startup() -> None:
     async def loop() -> None:
         while True:
             await service.tick()
-            await service.maybe_run_scheduled_backtest()
             await asyncio.sleep(60)
 
     asyncio.create_task(loop())
@@ -921,29 +869,46 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 @app.get("/dashboard/backtest", response_class=HTMLResponse)
 async def dashboard_backtest(request: Request) -> HTMLResponse:
-    if service.backtest_last_run is None:
-        await service.run_backtest_cycle()
+    now = datetime.now(timezone.utc)
+    rows: list[dict[str, Any]] = []
 
-    last_run_text = (
-        service.backtest_last_run.strftime("%Y-%m-%d %H:%M:%S UTC")
-        if service.backtest_last_run
-        else "未运行"
-    )
-    next_run_text = "未安排"
-    if service.backtest_last_run:
-        last_utc = service.backtest_last_run.astimezone(timezone.utc)
-        next_run = last_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=6)
-        next_run_text = next_run.strftime("%Y-%m-%d %H:%M:%S UTC")
+    for t in service.tokens.values():
+        try:
+            ohlcv = await service.gecko.fetch_ohlcv_24h(t.network, t.address)
+            if len(ohlcv) < 30:
+                continue
+            results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
+            rows.append(
+                {
+                    "symbol": t.symbol,
+                    "age": format_pool_age(t.pool_created_at, now, t.added_at),
+                    "address": t.address,
+                    "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                    "results": [
+                        {
+                            "strategy": r.strategy,
+                            "total": f"{r.total_pnl_sol:+.3f} SOL",
+                            "realized": f"{r.realized_pnl_sol:+.3f} SOL",
+                            "unrealized": f"{r.unrealized_pnl_sol:+.3f} SOL",
+                            "trades": r.trades,
+                        }
+                        for r in results
+                    ],
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "symbol": t.symbol,
+                    "age": format_pool_age(t.pool_created_at, now, t.added_at),
+                    "address": t.address,
+                    "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                    "error": str(exc),
+                    "results": [],
+                }
+            )
 
-    return templates.TemplateResponse(
-        "backtest_dashboard.html",
-        {
-            "request": request,
-            "rows": service.backtest_rows,
-            "last_run": last_run_text,
-            "next_run": next_run_text,
-        },
-    )
+    return templates.TemplateResponse("backtest_dashboard.html", {"request": request, "rows": rows})
 
 
 @app.get("/healthz")

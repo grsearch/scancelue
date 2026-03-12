@@ -171,9 +171,16 @@ def test_backtest_module_runs_and_returns_metrics():
     assert isinstance(res.trades, int)
 
 
-def test_backtest_slot_key_schedule():
-    svc = MonitorService()
-    assert svc.backtest_slot_key(datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)) == "2026-01-01-00"
-    assert svc.backtest_slot_key(datetime(2026, 1, 1, 6, 1, tzinfo=timezone.utc)) == "2026-01-01-06"
-    assert svc.backtest_slot_key(datetime(2026, 1, 1, 6, 2, tzinfo=timezone.utc)) is None
-    assert svc.backtest_slot_key(datetime(2026, 1, 1, 5, 59, tzinfo=timezone.utc)) is None
+def test_backtest_strategy5_ema_cross_buy_sell():
+    base_ts = 1_700_000_000
+    closes = [100.0] * 20 + [99.0, 98.0, 99.0, 100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 105.0, 100.0, 96.0, 93.0]
+    ohlcv = []
+    for i, c in enumerate(closes):
+        ts = base_ts + i * 60
+        ohlcv.append([ts, c, c, c, c, 1000])
+
+    cfg = BacktestConfig(name="策略5", require_5m_gate=False, use_stop70=False, use_ema_cross=True)
+    res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
+
+    assert res.strategy == "策略5"
+    assert res.trades >= 2
