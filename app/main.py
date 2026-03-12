@@ -332,8 +332,52 @@ class StrategyEngine:
         startup_bucket: int | None,
         close_5m_prev: float | None = None,
         close_5m_prev2: float | None = None,
+        token_age_hours: float | None = None,
+        ema9_1m_prev: float | None = None,
+        ema20_1m_prev: float | None = None,
     ) -> tuple[StrategyName, Signal, str]:
         close_1m = closes_1m[-1]
+        age_h = token_age_hours if token_age_hours is not None else 9999.0
+
+        # AGE < 12h: trend strategy
+        if age_h < 12:
+            has_trend = token.startup_entry_price is not None
+            if (
+                ema9_1m_prev is not None
+                and ema20_1m_prev is not None
+                and cross_up(ema9_1m_prev, ema9_1m, ema20_1m)
+            ):
+                token.startup_last_cross_bucket = 3
+
+            if has_trend:
+                entry = token.startup_entry_price or close_1m
+                if rsi1_now >= 80 or cross_down(rsi1_prev, rsi1_now, 70):
+                    return StrategyName.STARTUP, Signal.SELL, "趋势策略卖出：RSI下穿70或RSI>=80"
+
+                if (
+                    ema9_1m_prev is not None
+                    and ema20_1m_prev is not None
+                    and ema9_1m_prev >= ema20_1m_prev
+                    and ema9_1m < ema20_1m
+                ):
+                    token.startup_last_entry_cross_bucket = 1
+
+                if token.startup_last_entry_cross_bucket == 1 and close_1m <= entry * 0.80:
+                    return StrategyName.STARTUP, Signal.SELL, "趋势策略卖出：警戒状态触发80%止损"
+
+                return StrategyName.STARTUP, Signal.HOLD, "趋势策略HOLD：持仓中"
+
+            if token.startup_last_cross_bucket and token.startup_last_cross_bucket > 0:
+                can_buy = close_1m > ema9_1m and close_1m <= ema9_1m * 1.10 and rsi1_now < 75
+                token.startup_last_cross_bucket -= 1
+                if can_buy:
+                    token.startup_last_cross_bucket = 0
+                    token.startup_last_entry_cross_bucket = 0
+                    return StrategyName.STARTUP, Signal.BUY, "趋势策略买入：上穿后3根K线入场窗口"
+
+            return StrategyName.STARTUP, Signal.HOLD, "趋势策略HOLD：等待EMA上穿与入场条件"
+
+        # AGE >= 12h: rebound strategy
         has_rebound = token.rebound_entry_price is not None
 
         if has_rebound:
@@ -343,16 +387,14 @@ class StrategyEngine:
                 or cross_down(rsi1_prev, rsi1_now, 75)
                 or cross_down(rsi1_prev, rsi1_now, 70)
                 or cross_down(rsi1_prev, rsi1_now, 65)
+                or close_1m <= entry * 0.70
             ):
-                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75或过热"
-            if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
-                return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：满足5m开单条件且RSI再次上穿30"
+                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、过热或70%止损"
+            if (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
+                return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30"
 
-        if allow_open_rebound and (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：满足5m开单条件且RSI上穿30"
-
-        if (not allow_open_rebound) and (not has_rebound):
-            return StrategyName.REBOUND, Signal.HOLD, "反弹策略HOLD：5分钟EMA9<=EMA20，禁止开单"
+        if (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -684,8 +726,12 @@ class MonitorService:
                     continue
                 ema9_now = ema9_vals[-1]
                 ema20_now = ema20_vals[-1]
+                ema9_prev_1m = ema9_vals[-2] if len(ema9_vals) >= 2 else None
+                ema20_prev_1m = ema20_vals[-2] if len(ema20_vals) >= 2 else None
                 close = closes[-1]
                 rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
+                base_age = token.pool_created_at or token.added_at
+                token_age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
 
                 # Use 1m OHLCV resampled to closed 5m bars
                 bars_5m = resample_5m_closes(ohlcv)
@@ -709,10 +755,6 @@ class MonitorService:
                     if len(rsi5_vals) >= 2:
                         rsi5_prev, rsi5_now = rsi5_vals[-2], rsi5_vals[-1]
 
-                # single-strategy mode: ignore legacy startup position state
-                if token.startup_entry_price is not None:
-                    token.startup_entry_price = None
-
                 strategy, signal, reason = self.engine.evaluate(
                     token,
                     closes,
@@ -731,25 +773,38 @@ class MonitorService:
                     startup_bucket,
                     close_5m_prev,
                     close_5m_prev2,
+                    token_age_hours,
+                    ema9_prev_1m,
+                    ema20_prev_1m,
                 )
 
                 if signal == Signal.BUY:
-                    if token.rebound_entry_price is None:
-                        token.rebound_entry_price = close
-                    token.position.has_position = token.rebound_entry_price is not None
+                    if strategy == StrategyName.STARTUP:
+                        if token.startup_entry_price is None:
+                            token.startup_entry_price = close
+                        token.position.has_position = token.startup_entry_price is not None
+                    else:
+                        if token.rebound_entry_price is None:
+                            token.rebound_entry_price = close
+                        token.position.has_position = token.rebound_entry_price is not None
                 elif signal == Signal.ADD:
                     token.position.has_position = True
                     token.position.added_once = True
                     if token.rebound_add_entry_price is None:
                         token.rebound_add_entry_price = close
                 elif signal == Signal.SELL:
-                    if close > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
+                    if close > 0 and strategy == StrategyName.STARTUP and token.startup_entry_price and token.startup_entry_price > 0:
+                        token.realized_pnl_sol += (close / token.startup_entry_price) - 1.0
+                    elif close > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
                         legs = [token.rebound_entry_price]
                         if token.rebound_add_entry_price and token.rebound_add_entry_price > 0:
                             legs.append(token.rebound_add_entry_price)
                         token.realized_pnl_sol += sum((close / entry) - 1.0 for entry in legs)
                     token.rebound_entry_price = None
                     token.rebound_add_entry_price = None
+                    token.startup_entry_price = None
+                    token.startup_last_cross_bucket = 0
+                    token.startup_last_entry_cross_bucket = 0
                     token.position.added_once = False
                     token.position.has_position = False
 
@@ -845,8 +900,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     for t in service.tokens.values():
         current_pnl_sol = 0.0
         current_pnl_text = "N/A"
-        if t.price and t.price > 0 and t.rebound_entry_price and t.rebound_entry_price > 0:
+        if t.price and t.price > 0 and ((t.rebound_entry_price and t.rebound_entry_price > 0) or (t.startup_entry_price and t.startup_entry_price > 0)):
             legs = [t.rebound_entry_price]
+            if t.rebound_entry_price is None and t.startup_entry_price:
+                legs = [t.startup_entry_price]
             if t.rebound_add_entry_price and t.rebound_add_entry_price > 0:
                 legs.append(t.rebound_add_entry_price)
             current_pnl_sol = sum((t.price / entry) - 1.0 for entry in legs)

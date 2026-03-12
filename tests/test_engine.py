@@ -57,23 +57,27 @@ def test_rebound_buy_add_sell_logic():
 
 
 
-def test_rebound_open_gate_blocks_buy_and_add_when_5m_not_ready():
+def test_live_strategy_switch_by_age_hours():
     token = TokenRecord(network="solana", address="g", symbol="G")
+
+    # AGE >= 12h: rebound strategy (no 5m gate)
     strategy, signal, reason = StrategyEngine.evaluate(
         token, [100, 101, 102], 102, 101, 29, 31, False,
         None, None, None, None, None, None, None, None,
+        None, None, None,
     )
     assert strategy == StrategyName.REBOUND
-    assert signal == Signal.HOLD
-    assert "禁止开单" in reason
+    assert signal == Signal.BUY
 
-    token.rebound_entry_price = 100
-    token.position = PositionState(has_position=True, added_once=False)
+    # AGE < 12h: trend strategy
+    token = TokenRecord(network="solana", address="g2", symbol="G2")
     strategy, signal, _ = StrategyEngine.evaluate(
-        token, [100, 95, 90], 92, 91, 29, 31, False,
+        token, [100, 100, 100], 101, 100, 50, 60, False,
         None, None, None, None, None, None, None, None,
+        None, None, None, 6.0, 99.0, 100.0,
     )
-    assert signal == Signal.HOLD
+    assert strategy == StrategyName.STARTUP
+    assert signal in {Signal.HOLD, Signal.BUY}
 
 
 def test_hold_when_no_signal():
