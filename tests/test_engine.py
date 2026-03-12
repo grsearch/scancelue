@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.main import (
+    BACKTEST_CONFIGS,
     BacktestConfig,
     MonitorService,
     PositionState,
@@ -200,3 +201,15 @@ def test_backtest_strategy6_uses_1m_cross_for_entry_under_5m_gate():
 
     assert res.strategy == "策略6"
     assert res.trades >= 1
+
+
+def test_backtest_configs_include_strategy6_with_5m_gate():
+    names = [cfg.name for cfg in BACKTEST_CONFIGS]
+    assert "策略6" in names
+
+    cfg5 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "策略5")
+    cfg6 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "策略6")
+    assert cfg5.use_ema_cross is True
+    assert cfg6.use_ema_cross is True
+    assert cfg5.require_5m_gate is False
+    assert cfg6.require_5m_gate is True
