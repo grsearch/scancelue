@@ -26,7 +26,7 @@
       <h2>白名单汇总统计</h2>
       <table>
         <thead>
-          <tr><th>策略名称</th><th>总盈亏</th><th>总交易次数</th></tr>
+          <tr><th>策略名称</th><th>总盈亏</th><th>总交易次数（买+卖）</th></tr>
         </thead>
         <tbody>
           {% for s in summary %}
@@ -46,7 +46,7 @@
       <h2>回测结果</h2>
       <table>
         <thead>
-          <tr><th>Symbol</th><th>AGE</th><th>合约地址</th><th>策略回测（总盈亏 / 已实现 / 未实现 / 交易次数）</th></tr>
+          <tr><th>Symbol</th><th>AGE</th><th>合约地址</th><th>策略回测（总盈亏 / 已实现 / 未实现 / 交易次数[买+卖]）</th></tr>
         </thead>
         <tbody>
           {% for r in rows %}
@@ -60,7 +60,7 @@
               {% else %}
               <table class="subtable">
                 <thead>
-                  <tr><th>策略</th><th>总盈亏</th><th>已实现</th><th>未实现</th><th>交易次数</th></tr>
+                  <tr><th>策略</th><th>总盈亏</th><th>已实现</th><th>未实现</th><th>交易次数（买+卖）</th></tr>
                 </thead>
                 <tbody>
                   {% for x in r.results %}

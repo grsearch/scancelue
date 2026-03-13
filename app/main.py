@@ -541,12 +541,14 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                 if allow_open_rebound and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * config.add_drop_pct:
                     add_entry = close_now
                     added_once = True
+                    trades += 1
                     continue
 
             if (not has_pos) and allow_open_rebound and cross_up(rsi_prev, rsi_now, 30):
                 first_entry = close_now
                 add_entry = None
                 added_once = False
+                trades += 1
 
         elif config.mode == "trend":
             trend_trigger = ema9_prev < ema20_prev and ema9_now >= ema20_now
@@ -570,6 +572,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                 first_entry = close_now
                 add_entry = None
                 added_once = False
+                trades += 1
 
     unrealized = 0.0
     if first_entry is not None and first_entry > 0:
