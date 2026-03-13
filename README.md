@@ -32,6 +32,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 3003
 - `BUY_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/webhook/new-token`
 - `SELL_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/force-sell`
 - `STATE_FILE`：持久化状态文件路径，默认 `data/state.json`
+- `MONITOR_TICK_BUFFER_SECONDS`：5分钟边界后的缓冲秒数，默认 `5`（轮询对齐到 `xx:00:05 / xx:05:05 ...`）
 
 ## 添加代币示例
 

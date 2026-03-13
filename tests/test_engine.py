@@ -18,6 +18,7 @@ from app.main import (
     format_pool_age,
     parse_cg_datetime,
     rsi,
+    seconds_until_next_tick,
 )
 
 
@@ -262,3 +263,15 @@ def test_backtest_rebound_strategy3_runs():
 
     assert res3.strategy == "反弹策略3"
     assert isinstance(res3.trades, int)
+
+
+def test_seconds_until_next_tick_aligns_to_5m_boundary_with_buffer():
+    # 12:03:20 UTC => next 5m boundary 12:05:00, plus 5s buffer => 105 seconds
+    now_ts = 12 * 3600 + 3 * 60 + 20
+    assert seconds_until_next_tick(now_ts=now_ts, interval_seconds=300, buffer_seconds=5) == 105
+
+
+def test_seconds_until_next_tick_negative_buffer_is_clamped():
+    now_ts = 12 * 3600 + 4 * 60 + 59
+    # next boundary is 12:05:00; negative buffer behaves as 0
+    assert seconds_until_next_tick(now_ts=now_ts, interval_seconds=300, buffer_seconds=-7) == 1

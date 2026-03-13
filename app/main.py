@@ -903,6 +903,17 @@ class MonitorService:
         self.save_state()
 
 
+def seconds_until_next_tick(now_ts: int | None = None, interval_seconds: int = 300, buffer_seconds: int = 5) -> int:
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be > 0")
+    if now_ts is None:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+    buffer = max(0, int(buffer_seconds))
+    next_boundary = ((int(now_ts) // interval_seconds) + 1) * interval_seconds
+    target_ts = next_boundary + buffer
+    return max(0, target_ts - int(now_ts))
+
+
 service = MonitorService()
 app = FastAPI(title="SOL New Token Monitor")
 templates = Jinja2Templates(directory="templates")
@@ -913,9 +924,16 @@ async def startup() -> None:
     service.load_state()
 
     async def loop() -> None:
+        buffer_raw = os.getenv("MONITOR_TICK_BUFFER_SECONDS", "5")
+        try:
+            buffer_seconds = max(0, int(buffer_raw))
+        except ValueError:
+            buffer_seconds = 5
+
         while True:
             await service.tick()
-            await asyncio.sleep(300)
+            sleep_seconds = seconds_until_next_tick(interval_seconds=300, buffer_seconds=buffer_seconds)
+            await asyncio.sleep(sleep_seconds)
 
     asyncio.create_task(loop())
 
