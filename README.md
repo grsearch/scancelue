@@ -48,6 +48,7 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
   - 买入：`EMA9_prev < EMA20_prev` 且 `EMA9_now >= EMA20_now` 且 `close >= EMA9_now` 且 `RSI < 75`
   - 卖出：`EMA9_prev > EMA20_prev` 且 `EMA9_now <= EMA20_now`，或 `RSI >= 85`，或 `close <= entry*0.95`
 - AGE >= 12h：执行反弹策略
+  - 开单条件（5m）：`EMA9 > EMA20`
   - 买入：`RSI 上穿 30`
   - 加仓（仅一次）：`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.90`
   - 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.70`
@@ -56,6 +57,7 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 ## 回测策略（24小时）
 
 - 反弹策略：
+  - 开单条件（5m）：`EMA9 > EMA20`
   - 买入：`RSI 上穿 30`
   - 加仓（仅一次）：`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.90`
   - 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.70`

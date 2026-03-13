@@ -379,11 +379,14 @@ class StrategyEngine:
                 or close_1m <= entry * 0.70
             ):
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、过热或70%止损"
-            if (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
-                return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30"
+            if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
+                return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：5m EMA9>EMA20 且 RSI再次上穿30"
 
-        if (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
+        if (not has_rebound) and allow_open_rebound and cross_up(rsi1_prev, rsi1_now, 30):
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：5m EMA9>EMA20 且 RSI上穿30"
+
+        if (not has_rebound) and (not allow_open_rebound):
+            return StrategyName.REBOUND, Signal.HOLD, "反弹策略HOLD：5m EMA9<=EMA20，禁止开单"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 

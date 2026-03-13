@@ -60,9 +60,9 @@ def test_rebound_buy_add_sell_logic():
 def test_live_strategy_switch_by_age_hours():
     token = TokenRecord(network="solana", address="g", symbol="G")
 
-    # AGE >= 12h: rebound strategy (no 5m gate)
+    # AGE >= 12h: rebound strategy (requires 5m gate)
     strategy, signal, reason = StrategyEngine.evaluate(
-        token, [100, 101, 102], 102, 101, 29, 31, False,
+        token, [100, 101, 102], 102, 101, 29, 31, True,
         None, None, None, None, None, None, None, None,
         None, None, None,
     )
@@ -78,6 +78,18 @@ def test_live_strategy_switch_by_age_hours():
     )
     assert strategy == StrategyName.STARTUP
     assert signal in {Signal.HOLD, Signal.BUY}
+
+
+def test_rebound_requires_5m_gate_for_new_entry():
+    token = TokenRecord(network="solana", address="r1", symbol="R1")
+    strategy, signal, reason = StrategyEngine.evaluate(
+        token, [100, 101, 102], 102, 101, 29, 31, False,
+        None, None, None, None, None, None, None, None,
+        None, None, None,
+    )
+    assert strategy == StrategyName.REBOUND
+    assert signal == Signal.HOLD
+    assert "5m EMA9<=EMA20" in reason
 
 
 def test_hold_when_no_signal():
