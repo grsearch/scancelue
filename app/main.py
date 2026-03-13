@@ -976,6 +976,9 @@ async def dashboard(request: Request) -> HTMLResponse:
 async def dashboard_backtest(request: Request) -> HTMLResponse:
     now = datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
+    summary_map: dict[str, dict[str, Any]] = {
+        cfg.name: {"strategy": cfg.name, "total_pnl_sol": 0.0, "trades": 0} for cfg in BACKTEST_CONFIGS
+    }
 
     for t in service.tokens.values():
         try:
@@ -983,6 +986,9 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
             if len(ohlcv) < 30:
                 continue
             results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
+            for r in results:
+                summary_map[r.strategy]["total_pnl_sol"] += r.total_pnl_sol
+                summary_map[r.strategy]["trades"] += r.trades
             rows.append(
                 {
                     "symbol": t.symbol,
@@ -1013,7 +1019,19 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
                 }
             )
 
-    return templates.TemplateResponse("backtest_dashboard.html", {"request": request, "rows": rows})
+    summary = [
+        {
+            "strategy": x["strategy"],
+            "total": f"{x['total_pnl_sol']:+.3f} SOL",
+            "trades": x["trades"],
+        }
+        for x in summary_map.values()
+    ]
+
+    return templates.TemplateResponse(
+        "backtest_dashboard.html",
+        {"request": request, "rows": rows, "summary": summary},
+    )
 
 
 @app.get("/healthz")
