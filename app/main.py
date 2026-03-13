@@ -410,7 +410,7 @@ class StrategyEngine:
 class BacktestConfig:
     name: str
     mode: str
-    candle_minutes: int = 1
+    candle_minutes: int = 5
     require_open_gate: bool = True
     add_drop_pct: float = 0.90
     stop_loss_pct: float = 0.70
@@ -433,7 +433,7 @@ BACKTEST_CONFIGS = [
     BacktestConfig(
         name="反弹策略",
         mode="rebound",
-        candle_minutes=1,
+        candle_minutes=5,
         require_open_gate=False,
         add_drop_pct=0.80,
         stop_loss_pct=0.50,
@@ -445,7 +445,7 @@ BACKTEST_CONFIGS = [
     BacktestConfig(
         name="反弹策略2",
         mode="rebound",
-        candle_minutes=1,
+        candle_minutes=5,
         require_open_gate=False,
         add_drop_pct=0.80,
         stop_loss_pct=0.50,
@@ -457,7 +457,7 @@ BACKTEST_CONFIGS = [
     BacktestConfig(
         name="反弹策略3",
         mode="rebound",
-        candle_minutes=1,
+        candle_minutes=5,
         require_open_gate=False,
         add_drop_pct=0.80,
         stop_loss_pct=0.50,
@@ -915,7 +915,7 @@ async def startup() -> None:
     async def loop() -> None:
         while True:
             await service.tick()
-            await asyncio.sleep(60)
+            await asyncio.sleep(300)
 
     asyncio.create_task(loop())
 
