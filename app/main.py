@@ -344,32 +344,25 @@ class StrategyEngine:
             has_trend = token.startup_entry_price is not None
             trend_trigger = (
                 ema9_1m_prev is not None
-                and ema9_1m >= ema20_1m * 0.995
-                and ema9_1m > ema9_1m_prev
+                and ema20_1m_prev is not None
+                and ema9_1m_prev < ema20_1m_prev
+                and ema9_1m >= ema20_1m
             )
 
             if has_trend:
                 entry = token.startup_entry_price or close_1m
-                if rsi1_now >= 80 or cross_down(rsi1_prev, rsi1_now, 70):
-                    return StrategyName.STARTUP, Signal.SELL, "趋势策略卖出：RSI下穿70或RSI>=80"
-
                 if (
-                    ema9_1m_prev is not None
-                    and ema20_1m_prev is not None
-                    and ema9_1m_prev >= ema20_1m_prev
-                    and ema9_1m < ema20_1m
+                    (ema9_1m_prev is not None and ema20_1m_prev is not None and ema9_1m_prev > ema20_1m_prev and ema9_1m <= ema20_1m)
+                    or rsi1_now >= 85
+                    or close_1m <= entry * 0.95
                 ):
-                    token.startup_last_entry_cross_bucket = 1
-
-                if token.startup_last_entry_cross_bucket == 1 and close_1m <= entry * 0.80:
-                    return StrategyName.STARTUP, Signal.SELL, "趋势策略卖出：警戒状态触发80%止损"
+                    return StrategyName.STARTUP, Signal.SELL, "趋势策略卖出：EMA9下穿EMA20或RSI>=85或95%止损"
 
                 return StrategyName.STARTUP, Signal.HOLD, "趋势策略HOLD：持仓中"
 
-            can_buy = close_1m > ema9_1m and close_1m <= ema9_1m * 1.03 and rsi1_now < 70
+            can_buy = close_1m >= ema9_1m and rsi1_now < 75
             if trend_trigger and can_buy:
-                token.startup_last_entry_cross_bucket = 0
-                return StrategyName.STARTUP, Signal.BUY, "趋势策略买入：EMA9贴近EMA20并上行，且满足入场条件"
+                return StrategyName.STARTUP, Signal.BUY, "趋势策略买入：EMA9上穿EMA20且满足入场条件"
 
             return StrategyName.STARTUP, Signal.HOLD, "趋势策略HOLD：等待触发与入场条件"
 
@@ -443,7 +436,6 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     first_entry: float | None = None
     add_entry: float | None = None
     added_once = False
-    trend_alert = False
     realized = 0.0
     trades = 0
 
@@ -502,15 +494,14 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                 added_once = False
 
         elif config.mode == "trend":
-            trend_trigger = ema9_now >= ema20_now * 0.995 and ema9_now > ema9_prev
+            trend_trigger = ema9_prev < ema20_prev and ema9_now >= ema20_now
 
             if has_pos:
-                if rsi_now >= 80 or cross_down(rsi_prev, rsi_now, 70):
-                    sell = True
-                else:
-                    if ema9_prev >= ema20_prev and ema9_now < ema20_now:
-                        trend_alert = True
-                    sell = trend_alert and first_entry is not None and first_entry > 0 and close_now <= first_entry * 0.80
+                sell = (
+                    (ema9_prev > ema20_prev and ema9_now <= ema20_now)
+                    or rsi_now >= 85
+                    or (first_entry is not None and first_entry > 0 and close_now <= first_entry * 0.95)
+                )
 
                 if sell and first_entry is not None and first_entry > 0:
                     realized += (close_now / first_entry) - 1.0
@@ -518,14 +509,12 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     first_entry = None
                     add_entry = None
                     added_once = False
-                    trend_alert = False
                     continue
 
-            if (not has_pos) and trend_trigger and close_now > ema9_now and close_now <= ema9_now * 1.03 and rsi_now < 70:
+            if (not has_pos) and trend_trigger and close_now >= ema9_now and rsi_now < 75:
                 first_entry = close_now
                 add_entry = None
                 added_once = False
-                trend_alert = False
 
     unrealized = 0.0
     if first_entry is not None and first_entry > 0:
