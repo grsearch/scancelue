@@ -222,8 +222,13 @@ def test_backtest_configs_include_rebound123_only():
     names = [cfg.name for cfg in BACKTEST_CONFIGS]
     assert names == ["反弹策略", "反弹策略2", "反弹策略3"]
 
+    cfg1 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略")
     cfg2 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略2")
     cfg3 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略3")
+    assert cfg1.require_open_gate is True
+    assert cfg1.add_drop_pct == 0.80
+    assert cfg1.stop_loss_pct == 0.50
+    assert cfg1.sell_cross_65 is False
     assert cfg2.require_open_gate is False
     assert cfg3.require_open_gate is False
     assert cfg2.add_drop_pct == 0.80

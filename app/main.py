@@ -433,7 +433,18 @@ class BacktestResult:
 
 
 BACKTEST_CONFIGS = [
-    BacktestConfig(name="反弹策略", mode="rebound", candle_minutes=1, require_open_gate=True),
+    BacktestConfig(
+        name="反弹策略",
+        mode="rebound",
+        candle_minutes=1,
+        require_open_gate=True,
+        add_drop_pct=0.80,
+        stop_loss_pct=0.50,
+        sell_cross_65=False,
+        sell_cross_70=True,
+        sell_cross_75=True,
+        overbought_rsi=85.0,
+    ),
     BacktestConfig(
         name="反弹策略2",
         mode="rebound",
