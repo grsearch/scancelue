@@ -12,6 +12,9 @@ from app.main import (
     StrategyName,
     run_rebound_backtest_24h,
     TokenRecord,
+    BacktestResult,
+    should_enable_no_open_mode,
+    apply_no_open_filter,
     cross_down,
     cross_up,
     ema,
@@ -128,6 +131,7 @@ def test_persistence_roundtrip(tmp_path: Path):
     assert restored.tokens["addr1"].rebound_add_entry_price == 0.6
     assert restored.tokens["addr1"].realized_pnl_sol == 1.23
     assert restored.tokens["addr1"].position.added_once is True
+    assert restored.tokens["addr1"].no_open_mode is False
     assert "addr2" in restored.blacklist
 
 
@@ -282,3 +286,45 @@ def test_seconds_until_next_tick_negative_buffer_is_clamped():
     now_ts = 12 * 3600 + 4 * 60 + 59
     # next boundary is 12:05:00; negative buffer behaves as 0
     assert seconds_until_next_tick(now_ts=now_ts, interval_seconds=300, buffer_seconds=-7) == 1
+
+
+def test_should_enable_no_open_mode_when_all_three_strategies_lose():
+    results = [
+        BacktestResult(strategy="反弹策略", total_pnl_sol=-0.1, realized_pnl_sol=-0.1, unrealized_pnl_sol=0.0, trades=2),
+        BacktestResult(strategy="反弹策略2", total_pnl_sol=-0.2, realized_pnl_sol=-0.2, unrealized_pnl_sol=0.0, trades=3),
+        BacktestResult(strategy="反弹策略3", total_pnl_sol=-0.05, realized_pnl_sol=-0.05, unrealized_pnl_sol=0.0, trades=1),
+    ]
+    enabled, reason = should_enable_no_open_mode(results)
+    assert enabled is True
+    assert "三策略全亏损" in reason
+
+
+def test_should_not_enable_no_open_mode_with_non_loss_or_no_trade():
+    mixed = [
+        BacktestResult(strategy="反弹策略", total_pnl_sol=-0.1, realized_pnl_sol=-0.1, unrealized_pnl_sol=0.0, trades=2),
+        BacktestResult(strategy="反弹策略2", total_pnl_sol=0.01, realized_pnl_sol=0.01, unrealized_pnl_sol=0.0, trades=1),
+        BacktestResult(strategy="反弹策略3", total_pnl_sol=-0.05, realized_pnl_sol=-0.05, unrealized_pnl_sol=0.0, trades=1),
+    ]
+    enabled, _ = should_enable_no_open_mode(mixed)
+    assert enabled is False
+
+    no_trade = [
+        BacktestResult(strategy="反弹策略", total_pnl_sol=-0.1, realized_pnl_sol=-0.1, unrealized_pnl_sol=0.0, trades=0),
+        BacktestResult(strategy="反弹策略2", total_pnl_sol=-0.2, realized_pnl_sol=-0.2, unrealized_pnl_sol=0.0, trades=2),
+        BacktestResult(strategy="反弹策略3", total_pnl_sol=-0.05, realized_pnl_sol=-0.05, unrealized_pnl_sol=0.0, trades=1),
+    ]
+    enabled2, _ = should_enable_no_open_mode(no_trade)
+    assert enabled2 is False
+
+
+def test_apply_no_open_filter_blocks_buy_and_add_only():
+    s1, r1 = apply_no_open_filter(Signal.BUY, "buy", True, "bad")
+    assert s1 == Signal.HOLD
+    assert "不开单模式" in r1
+
+    s2, _ = apply_no_open_filter(Signal.ADD, "add", True, "bad")
+    assert s2 == Signal.HOLD
+
+    s3, r3 = apply_no_open_filter(Signal.SELL, "sell", True, "bad")
+    assert s3 == Signal.SELL
+    assert r3 == "sell"

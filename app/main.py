@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -96,6 +96,9 @@ class TokenRecord:
     startup_last_buy_bucket: int | None = None
     startup_last_cross_bucket: int | None = None
     startup_last_entry_cross_bucket: int | None = None
+    no_open_mode: bool = False
+    no_open_reason: str = ""
+    no_open_checked_at: datetime | None = None
 
 
 @dataclass
@@ -431,6 +434,25 @@ class BacktestResult:
     trades: int
 
 
+def should_enable_no_open_mode(results: list[BacktestResult]) -> tuple[bool, str]:
+    if not results:
+        return False, ""
+    valid = [r for r in results if r.trades > 0]
+    if len(valid) < len(results):
+        return False, ""
+    if all(r.total_pnl_sol < 0 for r in valid):
+        worst = min(valid, key=lambda x: x.total_pnl_sol)
+        return True, f"24h回测三策略全亏损（最差{worst.strategy}:{worst.total_pnl_sol:+.3f} SOL）"
+    return False, ""
+
+
+def apply_no_open_filter(signal: Signal, reason: str, no_open_mode: bool, no_open_reason: str) -> tuple[Signal, str]:
+    if no_open_mode and signal in {Signal.BUY, Signal.ADD}:
+        block_reason = no_open_reason or "24h回测三策略全亏损"
+        return Signal.HOLD, f"不开单模式：{block_reason}"
+    return signal, reason
+
+
 BACKTEST_CONFIGS = [
     BacktestConfig(
         name="反弹策略",
@@ -650,6 +672,9 @@ class MonitorService:
             "startup_last_buy_bucket": token.startup_last_buy_bucket,
             "startup_last_cross_bucket": token.startup_last_cross_bucket,
             "startup_last_entry_cross_bucket": token.startup_last_entry_cross_bucket,
+            "no_open_mode": token.no_open_mode,
+            "no_open_reason": token.no_open_reason,
+            "no_open_checked_at": self._dt_to_str(token.no_open_checked_at),
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -686,6 +711,9 @@ class MonitorService:
             startup_last_buy_bucket=payload.get("startup_last_buy_bucket"),
             startup_last_cross_bucket=payload.get("startup_last_cross_bucket"),
             startup_last_entry_cross_bucket=payload.get("startup_last_entry_cross_bucket"),
+            no_open_mode=bool(payload.get("no_open_mode", False)),
+            no_open_reason=str(payload.get("no_open_reason", "")),
+            no_open_checked_at=parse_cg_datetime(payload.get("no_open_checked_at")),
         )
 
     def save_state(self) -> None:
@@ -736,6 +764,22 @@ class MonitorService:
             self.save_state()
             return token
 
+    async def refresh_no_open_mode_if_due(self, token: TokenRecord, now: datetime) -> None:
+        if token.no_open_checked_at and (now - token.no_open_checked_at) < timedelta(hours=6):
+            return
+        ohlcv = await self.gecko.fetch_ohlcv_24h(token.network, token.address)
+        if len(ohlcv) < 30:
+            token.no_open_mode = False
+            token.no_open_reason = ""
+            token.no_open_checked_at = now
+            return
+
+        results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
+        no_open_mode, no_open_reason = should_enable_no_open_mode(results)
+        token.no_open_mode = no_open_mode
+        token.no_open_reason = no_open_reason
+        token.no_open_checked_at = now
+
     async def tick(self) -> None:
         async with self.lock:
             tokens = list(self.tokens.values())
@@ -757,6 +801,9 @@ class MonitorService:
                 await self._handle_whitelist_exit(token)
                 if token.address in self.blacklist:
                     continue
+
+                now = datetime.now(timezone.utc)
+                await self.refresh_no_open_mode_if_due(token, now)
 
                 # runtime now monitors on 5m candles (resampled from minute data)
                 ohlcv = await self.gecko.fetch_ohlcv(token.network, token.address)
@@ -819,6 +866,7 @@ class MonitorService:
                     ema9_prev_1m,
                     ema20_prev_1m,
                 )
+                signal, reason = apply_no_open_filter(signal, reason, token.no_open_mode, token.no_open_reason)
 
                 if signal == Signal.BUY:
                     if strategy == StrategyName.STARTUP:
@@ -983,6 +1031,8 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
                 "pnl": current_pnl_text,
                 "total_pnl": total_pnl_text,
+                "no_open_mode": t.no_open_mode,
+                "no_open_reason": t.no_open_reason,
             }
         )
     logs = [
@@ -1012,6 +1062,10 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
             if len(ohlcv) < 30:
                 continue
             results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
+            no_open_mode, no_open_reason = should_enable_no_open_mode(results)
+            t.no_open_mode = no_open_mode
+            t.no_open_reason = no_open_reason
+            t.no_open_checked_at = now
             for r in results:
                 summary_map[r.strategy]["total_pnl_sol"] += r.total_pnl_sol
                 summary_map[r.strategy]["trades"] += r.trades
@@ -1021,6 +1075,8 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
                     "age": format_pool_age(t.pool_created_at, now, t.added_at),
                     "address": t.address,
                     "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
+                    "no_open_mode": t.no_open_mode,
+                    "no_open_reason": t.no_open_reason,
                     "results": [
                         {
                             "strategy": r.strategy,
@@ -1041,6 +1097,8 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
                     "address": t.address,
                     "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
                     "error": str(exc),
+                    "no_open_mode": t.no_open_mode,
+                    "no_open_reason": t.no_open_reason,
                     "results": [],
                 }
             )
@@ -1053,6 +1111,7 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
         }
         for x in summary_map.values()
     ]
+    service.save_state()
 
     return templates.TemplateResponse(
         "backtest_dashboard.html",

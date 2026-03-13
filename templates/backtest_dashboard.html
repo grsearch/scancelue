@@ -20,7 +20,7 @@
   </head>
   <body>
     <h1>白名单代币 - 24小时回测</h1>
-    <p class="muted">回测包含三个策略：反弹策略1~3（策略2/3为更深回撤加仓和50%止损变体），单位按 1 SOL 首仓 + 1 SOL 加仓。</p>
+    <p class="muted">回测包含三个策略：反弹策略1~3；当三策略在24h回测中均亏损且均有交易时，系统会将该币标记为“不开单模式”。</p>
 
     <div class="card">
       <h2>白名单汇总统计</h2>
@@ -46,7 +46,7 @@
       <h2>回测结果</h2>
       <table>
         <thead>
-          <tr><th>Symbol</th><th>AGE</th><th>合约地址</th><th>策略回测（总盈亏 / 已实现 / 未实现 / 交易次数[买+卖]）</th></tr>
+          <tr><th>Symbol</th><th>AGE</th><th>合约地址</th><th>开单模式建议</th><th>策略回测（总盈亏 / 已实现 / 未实现 / 交易次数[买+卖]）</th></tr>
         </thead>
         <tbody>
           {% for r in rows %}
@@ -54,6 +54,7 @@
             <td>{{ r.symbol }}</td>
             <td>{{ r.age }}</td>
             <td><a href="{{ r.gmgn }}" target="_blank">{{ r.address }}</a></td>
+            <td>{% if r.no_open_mode %}<span class="neg">不开单</span><br/><span class="muted">{{ r.no_open_reason }}</span>{% else %}<span class="pos">正常</span>{% endif %}</td>
             <td>
               {% if r.error %}
                 <span class="neg">回测失败: {{ r.error }}</span>
@@ -78,7 +79,7 @@
             </td>
           </tr>
           {% else %}
-          <tr><td colspan="4">暂无白名单代币可回测</td></tr>
+          <tr><td colspan="5">暂无白名单代币可回测</td></tr>
           {% endfor %}
         </tbody>
       </table>
