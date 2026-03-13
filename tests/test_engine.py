@@ -234,9 +234,12 @@ def test_backtest_configs_include_rebound123_only():
     assert cfg1.sell_cross_65 is False
     assert cfg2.require_open_gate is False
     assert cfg3.require_open_gate is False
+    assert cfg2.enable_add is False
     assert cfg2.add_drop_pct == 0.80
     assert cfg2.stop_loss_pct == 0.50
+    assert cfg2.sell_cross_65 is False
     assert cfg3.sell_cross_65 is False
+    assert cfg3.stop_loss_pct == 0.70
 
 
 def test_backtest_rebound_strategy3_runs():
@@ -250,10 +253,10 @@ def test_backtest_rebound_strategy3_runs():
     cfg3 = BacktestConfig(
         name="反弹策略3",
         mode="rebound",
-        candle_minutes=1,
+        candle_minutes=5,
         require_open_gate=False,
         add_drop_pct=0.80,
-        stop_loss_pct=0.50,
+        stop_loss_pct=0.70,
         sell_cross_65=False,
         sell_cross_70=True,
         sell_cross_75=True,

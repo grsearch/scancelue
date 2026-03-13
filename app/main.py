@@ -412,6 +412,7 @@ class BacktestConfig:
     mode: str
     candle_minutes: int = 5
     require_open_gate: bool = True
+    enable_add: bool = True
     add_drop_pct: float = 0.90
     stop_loss_pct: float = 0.70
     sell_cross_65: bool = True
@@ -447,9 +448,10 @@ BACKTEST_CONFIGS = [
         mode="rebound",
         candle_minutes=5,
         require_open_gate=False,
+        enable_add=False,
         add_drop_pct=0.80,
         stop_loss_pct=0.50,
-        sell_cross_65=True,
+        sell_cross_65=False,
         sell_cross_70=True,
         sell_cross_75=True,
         overbought_rsi=85.0,
@@ -460,7 +462,7 @@ BACKTEST_CONFIGS = [
         candle_minutes=5,
         require_open_gate=False,
         add_drop_pct=0.80,
-        stop_loss_pct=0.50,
+        stop_loss_pct=0.70,
         sell_cross_65=False,
         sell_cross_70=True,
         sell_cross_75=True,
@@ -539,7 +541,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     added_once = False
                     continue
 
-                if (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * config.add_drop_pct:
+                if config.enable_add and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * config.add_drop_pct:
                     add_entry = close_now
                     added_once = True
                     trades += 1
