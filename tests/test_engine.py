@@ -220,4 +220,23 @@ def test_backtest_rebound_strategy2_stop70_sell():
 
 def test_backtest_configs_include_rebound_and_rebound2_only():
     names = [cfg.name for cfg in BACKTEST_CONFIGS]
-    assert names == ["反弹策略", "反弹策略2"]
+    assert names == ["反弹策略", "反弹策略2", "反弹策略3", "反弹策略4"]
+
+
+def test_backtest_rebound_strategy3_5m_and_strategy4_15m_run():
+    base_ts = 1_700_000_000
+    closes = [100.0 + ((i % 12) - 6) * 0.8 for i in range(360)]
+    ohlcv = []
+    for i, c in enumerate(closes):
+        ts = base_ts + i * 60
+        ohlcv.append([ts, c, c, c, c, 1000])
+
+    cfg3 = BacktestConfig(name="反弹策略3", mode="rebound", candle_minutes=5, require_open_gate=False)
+    cfg4 = BacktestConfig(name="反弹策略4", mode="rebound", candle_minutes=15, require_open_gate=False)
+    res3 = run_rebound_backtest_24h(ohlcv, cfg3, now_ts=base_ts + len(closes) * 60)
+    res4 = run_rebound_backtest_24h(ohlcv, cfg4, now_ts=base_ts + len(closes) * 60)
+
+    assert res3.strategy == "反弹策略3"
+    assert res4.strategy == "反弹策略4"
+    assert isinstance(res3.trades, int)
+    assert isinstance(res4.trades, int)

@@ -312,6 +312,23 @@ def resample_5m_closes(ohlcv: list[list[float]]) -> list[tuple[int, float]]:
     return out
 
 
+def resample_closes(ohlcv: list[list[float]], minutes: int) -> list[tuple[int, float]]:
+    if minutes <= 1:
+        return [(int(float(row[0])), float(row[4])) for row in ohlcv]
+    bucket_sec = minutes * 60
+    buckets: dict[int, list[float]] = {}
+    for row in ohlcv:
+        ts = int(float(row[0]))
+        close = float(row[4])
+        bucket = ts // bucket_sec
+        buckets.setdefault(bucket, []).append(close)
+    out: list[tuple[int, float]] = []
+    for b in sorted(buckets):
+        if buckets[b]:
+            out.append((b * bucket_sec, buckets[b][-1]))
+    return out
+
+
 class StrategyEngine:
     @staticmethod
     def evaluate(
@@ -396,6 +413,8 @@ class StrategyEngine:
 class BacktestConfig:
     name: str
     mode: str
+    candle_minutes: int = 1
+    require_open_gate: bool = True
 
 
 @dataclass
@@ -408,8 +427,10 @@ class BacktestResult:
 
 
 BACKTEST_CONFIGS = [
-    BacktestConfig(name="反弹策略", mode="rebound"),
-    BacktestConfig(name="反弹策略2", mode="rebound"),
+    BacktestConfig(name="反弹策略", mode="rebound", candle_minutes=1, require_open_gate=True),
+    BacktestConfig(name="反弹策略2", mode="rebound", candle_minutes=1, require_open_gate=True),
+    BacktestConfig(name="反弹策略3", mode="rebound", candle_minutes=5, require_open_gate=False),
+    BacktestConfig(name="反弹策略4", mode="rebound", candle_minutes=15, require_open_gate=False),
 
 
 def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, now_ts: int | None = None) -> BacktestResult:
@@ -419,7 +440,10 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     now_ts = now_ts or int(datetime.now(timezone.utc).timestamp())
     start_ts = now_ts - 24 * 3600
 
-    closes = [float(c[4]) for c in ohlcv]
+    tf_rows = resample_closes(ohlcv, config.candle_minutes)
+    if len(tf_rows) < 30:
+        return BacktestResult(config.name, 0.0, 0.0, 0.0, 0)
+    closes = [x[1] for x in tf_rows]
     rsi_vals = rsi(closes, 9)
     ema9_vals = ema(closes, 9)
     ema20_vals = ema(closes, 20)
@@ -442,12 +466,12 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     realized = 0.0
     trades = 0
 
-    for i in range(2, len(ohlcv)):
-        ts = int(float(ohlcv[i][0]))
+    for i in range(2, len(tf_rows)):
+        ts = tf_rows[i][0]
         if ts < start_ts:
             continue
 
-        close_now = float(ohlcv[i][4])
+        close_now = tf_rows[i][1]
         rsi_prev = rsi_vals[i - 2]
         rsi_now = rsi_vals[i - 1]
         ema9_prev = ema9_vals[i - 1]
@@ -456,12 +480,13 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
         ema20_now = ema20_vals[i]
 
         allow_open_rebound = True
-        bucket = ts // 300
-        if bucket in ema5_map:
-            gate_ema9, gate_ema20 = ema5_map[bucket]
-            allow_open_rebound = gate_ema9 > gate_ema20
-        else:
-            allow_open_rebound = False
+        if config.require_open_gate:
+            bucket = ts // 300
+            if bucket in ema5_map:
+                gate_ema9, gate_ema20 = ema5_map[bucket]
+                allow_open_rebound = gate_ema9 > gate_ema20
+            else:
+                allow_open_rebound = False
 
         has_pos = first_entry is not None
 
@@ -521,7 +546,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
 
     unrealized = 0.0
     if first_entry is not None and first_entry > 0:
-        last_close = float(ohlcv[-1][4])
+        last_close = tf_rows[-1][1]
         legs = [first_entry]
         if add_entry is not None and add_entry > 0:
             legs.append(add_entry)
