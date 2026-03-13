@@ -229,17 +229,20 @@ def test_backtest_configs_include_rebound123_only():
     assert cfg2.candle_minutes == 5
     assert cfg3.candle_minutes == 5
     assert cfg1.require_open_gate is False
-    assert cfg1.add_drop_pct == 0.80
-    assert cfg1.stop_loss_pct == 0.50
+    assert cfg1.buy_rsi_threshold == 30.0
+    assert cfg1.enable_add is False
+    assert cfg1.stop_loss_pct is None
     assert cfg1.sell_cross_65 is False
     assert cfg2.require_open_gate is False
-    assert cfg3.require_open_gate is False
+    assert cfg2.buy_rsi_threshold == 25.0
     assert cfg2.enable_add is False
-    assert cfg2.add_drop_pct == 0.80
     assert cfg2.stop_loss_pct == 0.50
     assert cfg2.sell_cross_65 is False
+    assert cfg3.require_open_gate is False
+    assert cfg3.buy_rsi_threshold == 20.0
+    assert cfg3.enable_add is False
     assert cfg3.sell_cross_65 is False
-    assert cfg3.stop_loss_pct == 0.70
+    assert cfg3.stop_loss_pct == 0.50
 
 
 def test_backtest_rebound_strategy3_runs():
@@ -255,8 +258,9 @@ def test_backtest_rebound_strategy3_runs():
         mode="rebound",
         candle_minutes=5,
         require_open_gate=False,
-        add_drop_pct=0.80,
-        stop_loss_pct=0.70,
+        buy_rsi_threshold=20.0,
+        enable_add=False,
+        stop_loss_pct=0.50,
         sell_cross_65=False,
         sell_cross_70=True,
         sell_cross_75=True,
