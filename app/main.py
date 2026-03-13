@@ -415,6 +415,12 @@ class BacktestConfig:
     mode: str
     candle_minutes: int = 1
     require_open_gate: bool = True
+    add_drop_pct: float = 0.90
+    stop_loss_pct: float = 0.70
+    sell_cross_65: bool = True
+    sell_cross_70: bool = True
+    sell_cross_75: bool = True
+    overbought_rsi: float = 85.0
 
 
 @dataclass
@@ -428,9 +434,30 @@ class BacktestResult:
 
 BACKTEST_CONFIGS = [
     BacktestConfig(name="反弹策略", mode="rebound", candle_minutes=1, require_open_gate=True),
-    BacktestConfig(name="反弹策略2", mode="rebound", candle_minutes=1, require_open_gate=True),
-    BacktestConfig(name="反弹策略3", mode="rebound", candle_minutes=5, require_open_gate=False),
-    BacktestConfig(name="反弹策略4", mode="rebound", candle_minutes=15, require_open_gate=False),
+    BacktestConfig(
+        name="反弹策略2",
+        mode="rebound",
+        candle_minutes=1,
+        require_open_gate=True,
+        add_drop_pct=0.80,
+        stop_loss_pct=0.50,
+        sell_cross_65=True,
+        sell_cross_70=True,
+        sell_cross_75=True,
+        overbought_rsi=85.0,
+    ),
+    BacktestConfig(
+        name="反弹策略3",
+        mode="rebound",
+        candle_minutes=1,
+        require_open_gate=True,
+        add_drop_pct=0.80,
+        stop_loss_pct=0.50,
+        sell_cross_65=False,
+        sell_cross_70=True,
+        sell_cross_75=True,
+        overbought_rsi=85.0,
+    ),
 
 
 def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, now_ts: int | None = None) -> BacktestResult:
@@ -493,11 +520,11 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
         if config.mode == "rebound":
             if has_pos:
                 sell = (
-                    rsi_now >= 85
-                    or cross_down(rsi_prev, rsi_now, 75)
-                    or cross_down(rsi_prev, rsi_now, 70)
-                    or cross_down(rsi_prev, rsi_now, 65)
-                    or (first_entry is not None and first_entry > 0 and close_now <= first_entry * 0.70)
+                    rsi_now >= config.overbought_rsi
+                    or (config.sell_cross_75 and cross_down(rsi_prev, rsi_now, 75))
+                    or (config.sell_cross_70 and cross_down(rsi_prev, rsi_now, 70))
+                    or (config.sell_cross_65 and cross_down(rsi_prev, rsi_now, 65))
+                    or (first_entry is not None and first_entry > 0 and close_now <= first_entry * config.stop_loss_pct)
                 )
 
                 if sell and first_entry is not None and first_entry > 0:
@@ -511,7 +538,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     added_once = False
                     continue
 
-                if allow_open_rebound and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * 0.90:
+                if allow_open_rebound and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * config.add_drop_pct:
                     add_entry = close_now
                     added_once = True
                     continue

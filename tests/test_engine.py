@@ -218,12 +218,18 @@ def test_backtest_rebound_strategy2_stop70_sell():
     assert isinstance(res.realized_pnl_sol, float)
 
 
-def test_backtest_configs_include_rebound_and_rebound2_only():
+def test_backtest_configs_include_rebound123_only():
     names = [cfg.name for cfg in BACKTEST_CONFIGS]
-    assert names == ["反弹策略", "反弹策略2", "反弹策略3", "反弹策略4"]
+    assert names == ["反弹策略", "反弹策略2", "反弹策略3"]
+
+    cfg2 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略2")
+    cfg3 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略3")
+    assert cfg2.add_drop_pct == 0.80
+    assert cfg2.stop_loss_pct == 0.50
+    assert cfg3.sell_cross_65 is False
 
 
-def test_backtest_rebound_strategy3_5m_and_strategy4_15m_run():
+def test_backtest_rebound_strategy3_runs():
     base_ts = 1_700_000_000
     closes = [100.0 + ((i % 12) - 6) * 0.8 for i in range(360)]
     ohlcv = []
@@ -231,12 +237,19 @@ def test_backtest_rebound_strategy3_5m_and_strategy4_15m_run():
         ts = base_ts + i * 60
         ohlcv.append([ts, c, c, c, c, 1000])
 
-    cfg3 = BacktestConfig(name="反弹策略3", mode="rebound", candle_minutes=5, require_open_gate=False)
-    cfg4 = BacktestConfig(name="反弹策略4", mode="rebound", candle_minutes=15, require_open_gate=False)
+    cfg3 = BacktestConfig(
+        name="反弹策略3",
+        mode="rebound",
+        candle_minutes=1,
+        require_open_gate=True,
+        add_drop_pct=0.80,
+        stop_loss_pct=0.50,
+        sell_cross_65=False,
+        sell_cross_70=True,
+        sell_cross_75=True,
+        overbought_rsi=85.0,
+    )
     res3 = run_rebound_backtest_24h(ohlcv, cfg3, now_ts=base_ts + len(closes) * 60)
-    res4 = run_rebound_backtest_24h(ohlcv, cfg4, now_ts=base_ts + len(closes) * 60)
 
     assert res3.strategy == "反弹策略3"
-    assert res4.strategy == "反弹策略4"
     assert isinstance(res3.trades, int)
-    assert isinstance(res4.trades, int)
