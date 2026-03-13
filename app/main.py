@@ -409,7 +409,7 @@ class BacktestResult:
 
 BACKTEST_CONFIGS = [
     BacktestConfig(name="反弹策略", mode="rebound"),
-    BacktestConfig(name="趋势策略", mode="trend"),
+    BacktestConfig(name="反弹策略2", mode="rebound"),
 
 
 def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, now_ts: int | None = None) -> BacktestResult:

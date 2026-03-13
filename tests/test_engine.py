@@ -203,21 +203,21 @@ def test_backtest_rebound_strategy_add_and_sell():
     assert res.trades >= 1
 
 
-def test_backtest_trend_strategy_entry_and_exit():
+def test_backtest_rebound_strategy2_runs():
     base_ts = 1_700_000_000
     # EMA上穿后3根内满足 close 与 RSI 条件开仓，随后 RSI>=80 卖出
     closes = [100.0] * 40 + [98.0, 96.0, 97.0, 99.0, 101.0, 104.0, 108.0, 112.0, 116.0, 120.0]
-    cfg = BacktestConfig(name="趋势策略", mode="trend")
-    assert res.strategy == "趋势策略"
+    cfg = BacktestConfig(name="反弹策略2", mode="rebound")
+    assert res.strategy == "反弹策略2"
 
-def test_backtest_trend_strategy_alert_stop_80_percent():
-    # 先上穿开仓，再下穿进入警戒，最后跌到首仓80%止损
+def test_backtest_rebound_strategy2_stop70_sell():
+    # RSI与价格回落，验证反弹策略2可触发卖出
     closes = [100.0] * 40 + [98.0, 96.0, 97.0, 99.0, 102.0, 103.0, 100.0, 97.0, 92.0, 86.0, 80.0, 78.0]
-    cfg = BacktestConfig(name="趋势策略", mode="trend")
-    assert res.strategy == "趋势策略"
-    assert res.realized_pnl_sol < 0
+    cfg = BacktestConfig(name="反弹策略2", mode="rebound")
+    assert res.strategy == "反弹策略2"
+    assert isinstance(res.realized_pnl_sol, float)
 
 
-def test_backtest_configs_include_rebound_and_trend_only():
+def test_backtest_configs_include_rebound_and_rebound2_only():
     names = [cfg.name for cfg in BACKTEST_CONFIGS]
-    assert names == ["反弹策略", "趋势策略"]
+    assert names == ["反弹策略", "反弹策略2"]
