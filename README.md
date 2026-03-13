@@ -10,7 +10,7 @@
   - SELL -> `POST /force-sell`
 - 白名单退出条件：
   - FDV < 20000
-  - 池年龄退出机制：已暂停
+  - `AGE > 24h` 且 `FDV < 50000`
   - 若退出时仍有持仓，则先发送 SELL webhook，再移入黑名单。
 - 提供 Dashboard：`GET /dashboard`（含当前盈亏与历史总盈亏）
 - `GET /dashboard/backtest`（白名单代币过去24小时回测：反弹策略/反弹策略2）

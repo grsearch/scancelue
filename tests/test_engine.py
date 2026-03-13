@@ -115,7 +115,7 @@ def test_datetime_and_age_helpers():
     assert format_pool_age(None, now, added) == "1.00h"
 
 
-def test_whitelist_exit_uses_added_at_when_pool_created_at_missing():
+def test_whitelist_exit_when_age_gt_24h_and_fdv_lt_50k():
     svc = MonitorService()
 
     class _DummyDispatcher:
@@ -131,6 +131,7 @@ def test_whitelist_exit_uses_added_at_when_pool_created_at_missing():
         added_at=datetime.now(timezone.utc).replace(microsecond=0),
     )
     token.added_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    token.fdv = 40000
     svc.tokens[token.address] = token
 
     asyncio.run(svc._handle_whitelist_exit(token))
@@ -138,6 +139,25 @@ def test_whitelist_exit_uses_added_at_when_pool_created_at_missing():
     assert token.address in svc.blacklist
     assert token.address not in svc.tokens
 
+
+def test_whitelist_not_exit_when_age_gt_24h_but_fdv_ge_50k():
+    svc = MonitorService()
+
+    class _DummyDispatcher:
+        async def send(self, token, signal, reason):
+            return None
+
+    svc.dispatcher = _DummyDispatcher()
+
+    token = TokenRecord(network="solana", address="keep_token", symbol="KEEP")
+    token.added_at = datetime.now(timezone.utc) - timedelta(hours=30)
+    token.fdv = 60000
+    svc.tokens[token.address] = token
+
+    asyncio.run(svc._handle_whitelist_exit(token))
+
+    assert token.address not in svc.blacklist
+    assert token.address in svc.tokens
 
 
 def test_backtest_module_runs_and_returns_metrics():
