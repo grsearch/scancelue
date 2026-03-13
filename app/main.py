@@ -396,14 +396,11 @@ class StrategyEngine:
                 or close_1m <= entry * 0.70
             ):
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、过热或70%止损"
-            if allow_open_rebound and (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
-                return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：5m EMA9>EMA20 且 RSI再次上穿30"
+            if (not token.position.added_once) and cross_up(rsi1_prev, rsi1_now, 30) and close_1m <= entry * 0.90:
+                return StrategyName.REBOUND, Signal.ADD, "反弹策略加仓：RSI再次上穿30"
 
-        if (not has_rebound) and allow_open_rebound and cross_up(rsi1_prev, rsi1_now, 30):
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：5m EMA9>EMA20 且 RSI上穿30"
-
-        if (not has_rebound) and (not allow_open_rebound):
-            return StrategyName.REBOUND, Signal.HOLD, "反弹策略HOLD：5m EMA9<=EMA20，禁止开单"
+        if (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -437,7 +434,7 @@ BACKTEST_CONFIGS = [
         name="反弹策略",
         mode="rebound",
         candle_minutes=1,
-        require_open_gate=True,
+        require_open_gate=False,
         add_drop_pct=0.80,
         stop_loss_pct=0.50,
         sell_cross_65=False,
@@ -518,13 +515,6 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
         ema20_now = ema20_vals[i]
 
         allow_open_rebound = True
-        if config.require_open_gate:
-            bucket = ts // 300
-            if bucket in ema5_map:
-                gate_ema9, gate_ema20 = ema5_map[bucket]
-                allow_open_rebound = gate_ema9 > gate_ema20
-            else:
-                allow_open_rebound = False
 
         has_pos = first_entry is not None
 
@@ -549,13 +539,13 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     added_once = False
                     continue
 
-                if allow_open_rebound and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * config.add_drop_pct:
+                if (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, 30) and close_now <= first_entry * config.add_drop_pct:
                     add_entry = close_now
                     added_once = True
                     trades += 1
                     continue
 
-            if (not has_pos) and allow_open_rebound and cross_up(rsi_prev, rsi_now, 30):
+            if (not has_pos) and cross_up(rsi_prev, rsi_now, 30):
                 first_entry = close_now
                 add_entry = None
                 added_once = False
@@ -763,8 +753,10 @@ class MonitorService:
                 if token.address in self.blacklist:
                     continue
 
+                # runtime now monitors on 5m candles (resampled from minute data)
                 ohlcv = await self.gecko.fetch_ohlcv(token.network, token.address)
-                closes = [float(c[4]) for c in ohlcv]
+                bars_5m = resample_5m_closes(ohlcv)
+                closes = [x[1] for x in bars_5m]
                 if len(closes) < 30:
                     continue
                 ema9_vals = ema(closes, 9)
@@ -781,16 +773,14 @@ class MonitorService:
                 base_age = token.pool_created_at or token.added_at
                 token_age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
 
-                # Use 1m OHLCV resampled to closed 5m bars
-                bars_5m = resample_5m_closes(ohlcv)
-                closes_5m = [x[1] for x in bars_5m]
+                closes_5m = closes
                 startup_bucket = bars_5m[-1][0] if bars_5m else None
                 ema9_5m = ema20_5m = ema9_5m_prev = ema20_5m_prev = None
                 rsi5_prev = rsi5_now = None
                 close_5m = closes_5m[-1] if closes_5m else None
                 close_5m_prev = closes_5m[-2] if len(closes_5m) >= 2 else None
                 close_5m_prev2 = closes_5m[-3] if len(closes_5m) >= 3 else None
-                allow_open_rebound = False
+                allow_open_rebound = True
                 if len(closes_5m) >= 21:
                     ema9_5m_vals = ema(closes_5m, 9)
                     ema20_5m_vals = ema(closes_5m, 20)
@@ -798,7 +788,6 @@ class MonitorService:
                     ema20_5m = ema20_5m_vals[-1]
                     ema9_5m_prev = ema9_5m_vals[-2]
                     ema20_5m_prev = ema20_5m_vals[-2]
-                    allow_open_rebound = ema9_5m > ema20_5m
                     rsi5_vals = rsi(closes_5m, 9)
                     if len(rsi5_vals) >= 2:
                         rsi5_prev, rsi5_now = rsi5_vals[-2], rsi5_vals[-1]
@@ -937,7 +926,7 @@ async def add_token(req: AddTokenRequest) -> dict[str, Any]:
     return {
         "ok": True,
         "token": {"network": token.network, "address": token.address, "symbol": token.symbol},
-        "message": "已加入白名单并开始1分钟监控",
+        "message": "已加入白名单并开始5分钟K线监控",
     }
 
 

@@ -2,9 +2,9 @@
 
 这是一个基于 FastAPI 的服务，支持：
 
-- `POST /webhook/add-token`：接收龙虾AI扫链 webhook，收录白名单并开始 1 分钟监控。
+- `POST /webhook/add-token`：接收龙虾AI扫链 webhook，收录白名单并开始 5 分钟K线监控。
 - 从 CoinGecko Pro On-Chain API 拉取 SOL 新币数据（OHLCV + FDV/价格/池创建时间(pool_created_at)）。
-- 执行双策略：1分钟反弹策略 + 5分钟启动策略（均使用 RSI=9, EMA9, EMA20），并输出 `BUY/ADD/SELL/HOLD`。
+- 执行双策略：按 AGE 分流的趋势/反弹策略，监控基于5分钟K线并输出 `BUY/ADD/SELL/HOLD`。
 - 自动将交易信号通过 webhook 下发：
   - BUY -> `POST /webhook/new-token`
   - SELL -> `POST /force-sell`
@@ -48,7 +48,6 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
   - 买入：`EMA9_prev < EMA20_prev` 且 `EMA9_now >= EMA20_now` 且 `close >= EMA9_now` 且 `RSI < 75`
   - 卖出：`EMA9_prev > EMA20_prev` 且 `EMA9_now <= EMA20_now`，或 `RSI >= 85`，或 `close <= entry*0.95`
 - AGE >= 12h：执行反弹策略
-  - 开单条件（5m）：`EMA9 > EMA20`
   - 买入：`RSI 上穿 30`
   - 加仓（仅一次）：`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.90`
   - 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.70`
@@ -57,17 +56,14 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 ## 回测策略（24小时）
 
 - 反弹策略：
-  - 开单条件（5m）：`EMA9 > EMA20`
   - 买入：`RSI 上穿 30`
   - 加仓（仅一次）：`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.80`
   - 卖出：`RSI 下穿 70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.50`
 - 反弹策略2：
-  - 不受5分钟 `EMA9 > EMA20` 限制
   - 买入：`RSI 上穿 30`
   - 加仓（仅一次）：`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.80`
   - 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.50`
 - 反弹策略3：
-  - 不受5分钟 `EMA9 > EMA20` 限制
   - 买入：`RSI 上穿 30`
   - 加仓（仅一次）：`RSI 再次上穿 30` 且 `close <= 首仓价 * 0.80`
   - 卖出：`RSI 下穿 70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.50`

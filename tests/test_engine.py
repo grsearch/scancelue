@@ -80,7 +80,7 @@ def test_live_strategy_switch_by_age_hours():
     assert signal in {Signal.HOLD, Signal.BUY}
 
 
-def test_rebound_requires_5m_gate_for_new_entry():
+def test_rebound_can_open_without_5m_gate():
     token = TokenRecord(network="solana", address="r1", symbol="R1")
     strategy, signal, reason = StrategyEngine.evaluate(
         token, [100, 101, 102], 102, 101, 29, 31, False,
@@ -88,8 +88,7 @@ def test_rebound_requires_5m_gate_for_new_entry():
         None, None, None,
     )
     assert strategy == StrategyName.REBOUND
-    assert signal == Signal.HOLD
-    assert "5m EMA9<=EMA20" in reason
+    assert signal == Signal.BUY
 
 
 def test_hold_when_no_signal():
@@ -225,7 +224,7 @@ def test_backtest_configs_include_rebound123_only():
     cfg1 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略")
     cfg2 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略2")
     cfg3 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略3")
-    assert cfg1.require_open_gate is True
+    assert cfg1.require_open_gate is False
     assert cfg1.add_drop_pct == 0.80
     assert cfg1.stop_loss_pct == 0.50
     assert cfg1.sell_cross_65 is False
