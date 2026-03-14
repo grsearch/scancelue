@@ -55,7 +55,14 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
   - 买入：`RSI 上穿 30`
   - 卖出：`RSI 下穿 70/75` 或 `RSI >= 85`
 - 趋势策略：
-  - 买入（出现就买）：`EMA9_prev < EMA20_prev` 且 `EMA9_now >= EMA20_now`
-  - 卖出（出现就卖）：`EMA9_prev > EMA20_prev` 且 `EMA9_now <= EMA20_now`
+  - 买入：
+    - 过去20根K线涨幅 `>= 40%`
+    - 且 价格回撤 `>= 10%`
+    - 且 `EMA9 > EMA20`
+    - 且 `close_prev <= EMA9`
+    - 且 `close > EMA9`
+    - 且 `RSI < 70`
+    - 且 `close <= EMA9 * 1.03`
+  - 卖出：`RSI >= 85` 或 `RSI 下穿 70` 或 `close < EMA9`
 
 说明：回测页面中的“交易次数”= **买入/加仓次数 + 卖出次数**。

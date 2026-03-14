@@ -513,8 +513,32 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                 trades += 1
 
         elif config.mode == "trend":
-            trend_buy = ema9_prev < ema20_prev and ema9_now >= ema20_now
-            trend_sell = ema9_prev > ema20_prev and ema9_now <= ema20_now
+            lookback = 20
+            recent_growth_ok = False
+            retrace_ok = False
+            if i >= lookback:
+                close_20_ago = tf_rows[i - lookback][1]
+                if close_20_ago > 0:
+                    recent_growth_ok = ((close_now / close_20_ago) - 1.0) >= 0.40
+                window_closes = [x[1] for x in tf_rows[i - lookback + 1 : i + 1]]
+                if window_closes:
+                    peak_close = max(window_closes)
+                    retrace_ok = peak_close > 0 and close_now <= peak_close * 0.90
+
+            trend_buy = (
+                recent_growth_ok
+                and retrace_ok
+                and ema9_now > ema20_now
+                and tf_rows[i - 1][1] <= ema9_now
+                and close_now > ema9_now
+                and rsi_now < 70
+                and close_now <= ema9_now * 1.03
+            )
+            trend_sell = (
+                rsi_now >= 85
+                or cross_down(rsi_prev, rsi_now, 70)
+                or close_now < ema9_now
+            )
 
             if has_pos and trend_sell and first_entry is not None and first_entry > 0:
                 realized += (close_now / first_entry) - 1.0
