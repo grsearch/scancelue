@@ -13,7 +13,7 @@
   - `AGE > 24h` 且 `FDV < 50000`
   - 若退出时仍有持仓，则先发送 SELL webhook，再移入黑名单。
 - 提供 Dashboard：`GET /dashboard`（含当前盈亏与历史总盈亏）
-- `GET /dashboard/backtest`（白名单代币过去24小时回测：反弹策略/反弹策略2）
+- `GET /dashboard/backtest`（白名单代币过去24小时回测：反弹策略/趋势策略）
 - 白名单/黑名单与信号日志会持久化到本地文件，服务重启后自动恢复。
 
 ## 快速启动
@@ -54,8 +54,8 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 - 反弹策略：
   - 买入：`RSI 上穿 30`
   - 卖出：`RSI 下穿 70/75` 或 `RSI >= 85`
-- 反弹策略2：
-  - 买入：`RSI 上穿 30`
-  - 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85`
+- 趋势策略：
+  - 买入（出现就买）：`EMA9_prev < EMA20_prev` 且 `EMA9_now >= EMA20_now`
+  - 卖出（出现就卖）：`EMA9_prev > EMA20_prev` 且 `EMA9_now <= EMA20_now`
 
 说明：回测页面中的“交易次数”= **买入/加仓次数 + 卖出次数**。

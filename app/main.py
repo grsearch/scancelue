@@ -414,16 +414,16 @@ BACKTEST_CONFIGS = [
         overbought_rsi=85.0,
     ),
     BacktestConfig(
-        name="反弹策略2",
-        mode="rebound",
+        name="趋势策略",
+        mode="trend",
         candle_minutes=5,
         require_open_gate=False,
         buy_rsi_threshold=30.0,
         enable_add=False,
         stop_loss_pct=None,
-        sell_cross_65=True,
-        sell_cross_70=True,
-        sell_cross_75=True,
+        sell_cross_65=False,
+        sell_cross_70=False,
+        sell_cross_75=False,
         overbought_rsi=85.0,
     ),
 ]
@@ -513,24 +513,18 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                 trades += 1
 
         elif config.mode == "trend":
-            trend_trigger = ema9_prev < ema20_prev and ema9_now >= ema20_now
+            trend_buy = ema9_prev < ema20_prev and ema9_now >= ema20_now
+            trend_sell = ema9_prev > ema20_prev and ema9_now <= ema20_now
 
-            if has_pos:
-                sell = (
-                    (ema9_prev > ema20_prev and ema9_now <= ema20_now)
-                    or rsi_now >= 85
-                    or (first_entry is not None and first_entry > 0 and close_now <= first_entry * 0.95)
-                )
+            if has_pos and trend_sell and first_entry is not None and first_entry > 0:
+                realized += (close_now / first_entry) - 1.0
+                trades += 1
+                first_entry = None
+                add_entry = None
+                added_once = False
+                continue
 
-                if sell and first_entry is not None and first_entry > 0:
-                    realized += (close_now / first_entry) - 1.0
-                    trades += 1
-                    first_entry = None
-                    add_entry = None
-                    added_once = False
-                    continue
-
-            if (not has_pos) and trend_trigger and close_now >= ema9_now and rsi_now < 75:
+            if (not has_pos) and trend_buy:
                 first_entry = close_now
                 add_entry = None
                 added_once = False
