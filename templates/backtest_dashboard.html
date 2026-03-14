@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SOL Backtest Dashboard</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; background: #0f172a; color: #e2e8f0; }
+      h1, h2 { margin: 0 0 12px; }
+      .card { background: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: 10px; border-bottom: 1px solid #334155; text-align: left; font-size: 14px; vertical-align: top; }
+      a { color: #93c5fd; text-decoration: none; }
+      .pos { color: #4ade80; }
+      .neg { color: #f87171; }
+      .subtable { width: 100%; border-collapse: collapse; }
+      .subtable th, .subtable td { border-bottom: 1px dashed #334155; padding: 6px; font-size: 13px; }
+      .muted { color: #94a3b8; }
+    </style>
+  </head>
+  <body>
+    <h1>白名单代币 - 24小时回测</h1>
+    <p class="muted">回测包含两个策略：反弹策略、趋势策略。</p>
+
+    <div class="card">
+      <h2>白名单汇总统计</h2>
+      <table>
+        <thead>
+          <tr><th>策略名称</th><th>总盈亏</th><th>总交易次数（买+卖）</th></tr>
+        </thead>
+        <tbody>
+          {% for s in summary %}
+          <tr>
+            <td>{{ s.strategy }}</td>
+            <td class="{{ 'pos' if s.total.startswith('+') else 'neg' if s.total.startswith('-') else '' }}">{{ s.total }}</td>
+            <td>{{ s.trades }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3">暂无汇总数据</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>回测结果</h2>
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>AGE</th><th>合约地址</th><th>策略回测（总盈亏 / 已实现 / 未实现 / 交易次数[买+卖]）</th></tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td>{{ r.symbol }}</td>
+            <td>{{ r.age }}</td>
+            <td><a href="{{ r.gmgn }}" target="_blank">{{ r.address }}</a></td>
+            <td>
+              {% if r.error %}
+                <span class="neg">回测失败: {{ r.error }}</span>
+              {% else %}
+              <table class="subtable">
+                <thead>
+                  <tr><th>策略</th><th>总盈亏</th><th>已实现</th><th>未实现</th><th>交易次数（买+卖）</th></tr>
+                </thead>
+                <tbody>
+                  {% for x in r.results %}
+                  <tr>
+                    <td>{{ x.strategy }}</td>
+                    <td class="{{ 'pos' if x.total.startswith('+') else 'neg' if x.total.startswith('-') else '' }}">{{ x.total }}</td>
+                    <td>{{ x.realized }}</td>
+                    <td>{{ x.unrealized }}</td>
+                    <td>{{ x.trades }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4">暂无白名单代币可回测</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </body>
+</html>
