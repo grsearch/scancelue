@@ -3,7 +3,7 @@
 这是一个基于 FastAPI 的服务，支持：
 
 - `POST /webhook/add-token`：接收龙虾AI扫链 webhook，收录白名单并开始 1 分钟K线监控。
-- 从 CoinGecko Pro On-Chain API 拉取 SOL 新币数据（OHLCV + FDV/价格/池创建时间(pool_created_at)）。
+- 从 Birdeye API 拉取 SOL 新币数据（OHLCV + FDV/价格/创建时间）。
 - 执行实盘反弹策略（1分钟K线），输出 `BUY/SELL/HOLD`。
 - 自动将交易信号通过 webhook 下发：
   - BUY -> `POST /webhook/new-token`
@@ -14,6 +14,7 @@
   - 若退出时仍有持仓，则先发送 SELL webhook，再移入黑名单。
 - 提供 Dashboard：`GET /dashboard`（含当前盈亏与历史总盈亏）
 - `GET /dashboard/backtest`（白名单代币过去24小时回测：反弹策略/趋势策略）
+- 说明：当前实现使用 Birdeye REST 拉取 OHLCV；Birdeye WebSocket（Premium Plus 支持）可用于后续低延迟连续订阅扩展。
 - 白名单/黑名单与信号日志会持久化到本地文件，服务重启后自动恢复。
 
 ## 快速启动
@@ -27,8 +28,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 3003
 
 ## 环境变量
 
-- `COINGECKO_API_KEY`：CoinGecko Pro API key（推荐配置）
-- `COINGECKO_BASE_URL`：默认 `https://pro-api.coingecko.com/api/v3/onchain`
+- `BIRDEYE_API_KEY`：Birdeye API key（推荐配置）
+- `BIRDEYE_BASE_URL`：默认 `https://public-api.birdeye.so`
 - `BUY_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/webhook/new-token`
 - `SELL_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/force-sell`
 - `STATE_FILE`：持久化状态文件路径，默认 `data/state.json`

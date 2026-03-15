@@ -117,10 +117,29 @@ class AddTokenRequest(BaseModel):
     symbol: str
 
 
-class GeckoClient:
+class BirdeyeClient:
     def __init__(self) -> None:
-        self.base = os.getenv("COINGECKO_BASE_URL", "https://pro-api.coingecko.com/api/v3/onchain")
-        self.api_key = os.getenv("COINGECKO_API_KEY", "")
+        self.base = os.getenv("BIRDEYE_BASE_URL", "https://public-api.birdeye.so")
+        self.api_key = os.getenv("BIRDEYE_API_KEY", "")
+
+    @staticmethod
+    def _network_to_chain(network: str) -> str:
+        return "solana" if network.lower() == "solana" else network.lower()
+
+    def _headers(self, network: str) -> dict[str, str]:
+        headers = {"x-chain": self._network_to_chain(network)}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        return headers
+
+    @staticmethod
+    def _to_float(v: Any) -> float | None:
+        try:
+            if v is None:
+                return None
+            return float(v)
+        except (TypeError, ValueError):
+            return None
 
     async def fetch_ohlcv(
         self,
@@ -130,33 +149,75 @@ class GeckoClient:
         limit: int = 200,
         before_timestamp: int | None = None,
     ) -> list[list[float]]:
-        # Default 200 bars for runtime; backtest may request larger window.
-        url = f"{self.base}/networks/{network}/tokens/{token}/ohlcv/{timeframe}"
-        params: dict[str, Any] = {"limit": limit}
-        if before_timestamp is not None:
-            params["before_timestamp"] = before_timestamp
-        headers = {"x-cg-pro-api-key": self.api_key} if self.api_key else {}
+        # Birdeye OHLCV endpoint
+        tf_map = {"minute": "1m", "hour": "1h", "day": "1d"}
+        ohlcv_type = tf_map.get(timeframe, timeframe)
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        time_to = before_timestamp if before_timestamp is not None else now_ts
+        time_from = max(0, time_to - max(1, int(limit)) * 60)
+        url = f"{self.base}/defi/ohlcv"
+        params: dict[str, Any] = {
+            "address": token,
+            "type": ohlcv_type,
+            "time_from": time_from,
+            "time_to": time_to,
+        }
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, params=params, headers=headers)
+            resp = await client.get(url, params=params, headers=self._headers(network))
             resp.raise_for_status()
             payload = resp.json()
-        attrs = payload.get("data", {}).get("attributes", {})
-        ohlcv = attrs.get("ohlcv_list") or []
-        return sorted(ohlcv, key=lambda x: x[0])
+        data = payload.get("data") or {}
+        items = data.get("items") or data.get("candles") or data.get("list") or []
+        out: list[list[float]] = []
+        for item in items:
+            if isinstance(item, dict):
+                ts = int(float(item.get("unixTime") or item.get("time") or item.get("t") or 0))
+                o = self._to_float(item.get("o") or item.get("open"))
+                h = self._to_float(item.get("h") or item.get("high"))
+                l = self._to_float(item.get("l") or item.get("low"))
+                c = self._to_float(item.get("c") or item.get("close") or item.get("value"))
+                v = self._to_float(item.get("v") or item.get("volume") or 0) or 0.0
+                if ts > 0 and o is not None and h is not None and l is not None and c is not None:
+                    out.append([float(ts), o, h, l, c, v])
+            elif isinstance(item, list) and len(item) >= 6:
+                out.append([float(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4]), float(item[5])])
+        return sorted(out, key=lambda x: x[0])
 
     async def fetch_token_meta(self, network: str, token: str) -> dict[str, Any]:
-        url = f"{self.base}/networks/{network}/tokens/{token}"
-        headers = {"x-cg-pro-api-key": self.api_key} if self.api_key else {}
+        price_url = f"{self.base}/defi/price"
+        overview_url = f"{self.base}/defi/token_overview"
+        price = 0.0
+        fdv: float | None = None
+        created_at: Any = None
+
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            payload = resp.json()
-        attributes = payload.get("data", {}).get("attributes", {})
+            price_resp = await client.get(price_url, params={"address": token}, headers=self._headers(network))
+            price_resp.raise_for_status()
+            price_payload = price_resp.json()
+
+            overview_resp = await client.get(overview_url, params={"address": token}, headers=self._headers(network))
+            overview_resp.raise_for_status()
+            overview_payload = overview_resp.json()
+
+        price_data = price_payload.get("data") or {}
+        if isinstance(price_data, dict):
+            price = self._to_float(price_data.get("value") or price_data.get("price")) or 0.0
+
+        overview_data = overview_payload.get("data") or {}
+        if isinstance(overview_data, dict):
+            fdv = self._to_float(
+                overview_data.get("fdv")
+                or overview_data.get("fullyDilutedValuation")
+                or overview_data.get("mc")
+                or overview_data.get("marketCap")
+            )
+            created_at = overview_data.get("createdAt") or overview_data.get("created_at") or overview_data.get("pairCreatedAt")
+
         return {
-            "fdv": float(attributes.get("fdv_usd") or 0),
-            "price": float(attributes.get("price_usd") or 0),
-            "pool_created_at": attributes.get("pool_created_at"),
-            "created_at": attributes.get("created_at"),
+            "fdv": float(fdv or 0),
+            "price": float(price or 0),
+            "pool_created_at": created_at,
+            "created_at": created_at,
         }
 
 
@@ -652,7 +713,7 @@ class MonitorService:
         self.blacklist: set[str] = set()
         self.logs: list[SignalLog] = []
         self.engine = StrategyEngine()
-        self.gecko = GeckoClient()
+        self.market_data = BirdeyeClient()
         self.dispatcher = SignalDispatcher()
         self.lock = asyncio.Lock()
         self.state_path = Path(os.getenv("STATE_FILE", "data/state.json"))
@@ -785,7 +846,7 @@ class MonitorService:
 
         for token in tokens:
             try:
-                meta = await self.gecko.fetch_token_meta(token.network, token.address)
+                meta = await self.market_data.fetch_token_meta(token.network, token.address)
                 token.fdv = meta["fdv"]
                 token.price = meta["price"]
                 pool_created = meta.get("pool_created_at")
@@ -802,7 +863,7 @@ class MonitorService:
                     continue
 
                 # runtime now monitors on 1m candles
-                ohlcv = await self.gecko.fetch_ohlcv(token.network, token.address)
+                ohlcv = await self.market_data.fetch_ohlcv(token.network, token.address)
                 closes = [float(row[4]) for row in ohlcv if len(row) >= 5]
                 if len(closes) < 30:
                     continue
@@ -1039,7 +1100,7 @@ async def dashboard_backtest(request: Request) -> HTMLResponse:
 
     for t in service.tokens.values():
         try:
-            ohlcv = await service.gecko.fetch_ohlcv_24h(t.network, t.address)
+            ohlcv = await service.market_data.fetch_ohlcv_24h(t.network, t.address)
             if len(ohlcv) < 30:
                 continue
             results = [run_rebound_backtest_24h(ohlcv, cfg) for cfg in BACKTEST_CONFIGS]
