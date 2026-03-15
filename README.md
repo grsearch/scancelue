@@ -13,7 +13,7 @@
   - `AGE > 6h`
   - 若退出时仍有持仓，则先发送 SELL webhook，再移入黑名单。
 - 提供 Dashboard：`GET /dashboard`（含当前盈亏与历史总盈亏）
-- `GET /dashboard/backtest`（白名单代币过去24小时回测：反弹策略/趋势策略）
+- `GET /dashboard/backtest`（白名单代币过去24小时回测：反弹策略/反弹策略2）
 - 说明：当前实现已采用“WebSocket 主链路 + REST 辅助”模式：Birdeye WebSocket 触发实时信号评估，Birdeye REST 用于启动预热、断线补K与对账。
 - 白名单/黑名单与信号日志会持久化到本地文件，服务重启后自动恢复。
 
@@ -49,7 +49,7 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 
 ### 实盘策略（仅反弹策略）
 - 买入：`RSI 上穿 30`
-- 卖出：`RSI 下穿 70/75` 或 `RSI >= 85`
+- 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.90`
 
 
 ## 回测策略（24小时，统一使用1分钟K线）
@@ -57,14 +57,8 @@ curl -X POST http://127.0.0.1:3003/webhook/add-token \
 - 反弹策略：
   - 买入：`RSI 上穿 30`
   - 卖出：`RSI 下穿 70/75` 或 `RSI >= 85`
-- 趋势策略：
-  - 买入：
-    - `EMA9 > EMA20`
-    - `EMA20_now > EMA20_3bars_ago`
-    - `close > VWAP`
-    - 最近3根内发生过：`EMA9 上穿 EMA20` 或突破最近5根高点
-    - 随后出现1~3根回踩：`low >= EMA20 * 0.995` 且回踩成交量低于启动K
-    - 当前触发：`close > high[1]` 且 `close > EMA9` 且 `RSI(9) > 55` 且 `RSI(9) < 78`
-  - 卖出：`close <= entry * 0.955` 或 `close < EMA20` 或 `EMA9 下穿 EMA20` 或 `RSI(9) 从 >75 跌回 <70`
+- 反弹策略2：
+  - 买入：`RSI 上穿 30`
+  - 卖出：`RSI 下穿 65/70/75` 或 `RSI >= 85` 或 `close <= 首仓价 * 0.90`
 
 说明：回测页面中的“交易次数”= **买入/加仓次数 + 卖出次数**。

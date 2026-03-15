@@ -555,8 +555,10 @@ class StrategyEngine:
                 rsi1_now >= 85
                 or cross_down(rsi1_prev, rsi1_now, 75)
                 or cross_down(rsi1_prev, rsi1_now, 70)
+                or cross_down(rsi1_prev, rsi1_now, 65)
+                or (token.rebound_entry_price is not None and close_1m <= token.rebound_entry_price * 0.90)
             ):
-                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿70/75或RSI>=85"
+                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、RSI>=85或跌破首仓90%"
 
         if (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
@@ -605,16 +607,16 @@ BACKTEST_CONFIGS = [
         overbought_rsi=85.0,
     ),
     BacktestConfig(
-        name="趋势策略",
-        mode="trend",
+        name="反弹策略2",
+        mode="rebound",
         candle_minutes=1,
         require_open_gate=False,
         buy_rsi_threshold=30.0,
         enable_add=False,
-        stop_loss_pct=None,
-        sell_cross_65=False,
-        sell_cross_70=False,
-        sell_cross_75=False,
+        stop_loss_pct=0.90,
+        sell_cross_65=True,
+        sell_cross_70=True,
+        sell_cross_75=True,
         overbought_rsi=85.0,
     ),
 ]
@@ -975,7 +977,7 @@ class MonitorService:
             # runtime now monitors on 1m candles
             ohlcv = await self.market_data.fetch_ohlcv(token.network, token.address)
             closes = [float(row[4]) for row in ohlcv if len(row) >= 5]
-            if len(closes) < 30:
+            if len(closes) < 11:
                 return
             ema9_vals = ema(closes, 9)
             ema20_vals = ema(closes, 20)

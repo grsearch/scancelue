@@ -61,6 +61,27 @@ def test_rebound_can_open_without_5m_gate():
     assert signal == Signal.BUY
 
 
+
+
+def test_rebound_sell_on_cross65_or_stoploss():
+    token = TokenRecord(network="solana", address="s1", symbol="S1")
+    token.rebound_entry_price = 100
+    token.position = PositionState(has_position=True, added_once=False)
+
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token, [100, 99, 98], 99, 100, 66, 64, True,
+        None, None, None, None, None, None, None, None,
+    )
+    assert strategy == StrategyName.REBOUND
+    assert signal == Signal.SELL
+
+    strategy, signal, _ = StrategyEngine.evaluate(
+        token, [100, 91, 89], 95, 98, 50, 52, True,
+        None, None, None, None, None, None, None, None,
+    )
+    assert strategy == StrategyName.REBOUND
+    assert signal == Signal.SELL
+
 def test_hold_when_no_signal():
     token = TokenRecord(network="solana", address="c", symbol="C")
     token.rebound_entry_price = 100
@@ -193,7 +214,7 @@ def test_backtest_rebound_strategy_add_and_sell():
     assert isinstance(res.trades, int)
 
 
-def test_backtest_trend_strategy_runs():
+def test_backtest_rebound2_strategy_runs():
     base_ts = 1_700_000_000
     closes = [100.0 + (i * 0.2) for i in range(80)]
     ohlcv = []
@@ -201,15 +222,15 @@ def test_backtest_trend_strategy_runs():
         ts = base_ts + i * 60
         ohlcv.append([ts, c, c, c, c, 1000])
 
-    cfg = BacktestConfig(name="趋势策略", mode="trend")
+    cfg = BacktestConfig(name="反弹策略2", mode="rebound", sell_cross_65=True, sell_cross_70=True, sell_cross_75=True, stop_loss_pct=0.90)
     res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
 
-    assert res.strategy == "趋势策略"
+    assert res.strategy == "反弹策略2"
     assert isinstance(res.trades, int)
 
 
 
-def test_backtest_trend_strategy_buy_and_sell_rules_shape():
+def test_backtest_rebound2_strategy_buy_and_sell_rules_shape():
     base_ts = 1_700_000_000
     # 构造一段上涨后回撤的数据，用于覆盖趋势策略分支
     closes = [100.0 + (i * 0.5) for i in range(40)] + [118.0, 115.0, 112.0, 110.0, 108.0, 111.0, 113.0, 112.0, 110.0, 107.0]
@@ -218,20 +239,20 @@ def test_backtest_trend_strategy_buy_and_sell_rules_shape():
         ts = base_ts + i * 60
         ohlcv.append([ts, c, c, c, c, 1000])
 
-    cfg = BacktestConfig(name="趋势策略", mode="trend")
+    cfg = BacktestConfig(name="反弹策略2", mode="rebound", sell_cross_65=True, sell_cross_70=True, sell_cross_75=True, stop_loss_pct=0.90)
     res = run_rebound_backtest_24h(ohlcv, cfg, now_ts=base_ts + len(closes) * 60)
 
-    assert res.strategy == "趋势策略"
+    assert res.strategy == "反弹策略2"
     assert isinstance(res.trades, int)
 
 
 
 def test_backtest_configs_include_rebound12_only():
     names = [cfg.name for cfg in BACKTEST_CONFIGS]
-    assert names == ["反弹策略", "趋势策略"]
+    assert names == ["反弹策略", "反弹策略2"]
 
     cfg1 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略")
-    cfg2 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "趋势策略")
+    cfg2 = next(cfg for cfg in BACKTEST_CONFIGS if cfg.name == "反弹策略2")
     assert cfg1.candle_minutes == 1
     assert cfg2.candle_minutes == 1
     assert cfg1.require_open_gate is False
@@ -240,10 +261,10 @@ def test_backtest_configs_include_rebound12_only():
     assert cfg1.stop_loss_pct is None
     assert cfg1.sell_cross_65 is False
     assert cfg2.require_open_gate is False
-    assert cfg2.mode == "trend"
+    assert cfg2.mode == "rebound"
     assert cfg2.enable_add is False
-    assert cfg2.stop_loss_pct is None
-    assert cfg2.sell_cross_65 is False
+    assert cfg2.stop_loss_pct == 0.90
+    assert cfg2.sell_cross_65 is True
 
 
 
