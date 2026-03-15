@@ -11,6 +11,12 @@ from typing import Any
 
 
 import httpx
+
+try:
+    import websockets
+except Exception:  # pragma: no cover - optional runtime dependency
+    websockets = None
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -266,6 +272,91 @@ class BirdeyeClient:
             dedup[int(float(row[0]))] = row
         out = [row for ts, row in sorted(dedup.items()) if ts >= start_ts]
         return out
+
+
+class BirdeyeWebSocketConsumer:
+    """Realtime trigger channel: consume Birdeye WS events and enqueue token updates."""
+
+    def __init__(self, service: "MonitorService") -> None:
+        self.service = service
+        self.ws_url = os.getenv("BIRDEYE_WS_URL", "wss://public-api.birdeye.so/socket")
+        self.enabled = os.getenv("BIRDEYE_WS_ENABLED", "1") == "1"
+
+    @staticmethod
+    def _extract_address(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        keys = ["address", "tokenAddress", "mint", "baseAddress", "baseMint", "symbolAddress"]
+        for k in keys:
+            v = payload.get(k)
+            if isinstance(v, str) and v:
+                return v
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for k in keys:
+                v = data.get(k)
+                if isinstance(v, str) and v:
+                    return v
+        return None
+
+    async def _send_subscriptions(self, ws: Any) -> None:
+        addresses = await self.service.get_token_addresses()
+        if not addresses:
+            return
+        # Send a few compatible subscription formats for Birdeye WS variants.
+        messages = [
+            {"type": "SUBSCRIBE_PRICE", "data": {"addresses": addresses}},
+            {"type": "SUBSCRIBE_OHLCV", "data": {"type": "1m", "addresses": addresses}},
+            {"op": "subscribe", "channel": "price", "data": {"addresses": addresses}},
+        ]
+        for msg in messages:
+            try:
+                await ws.send(json.dumps(msg))
+            except Exception:
+                continue
+
+    async def run_forever(self) -> None:
+        if not self.enabled:
+            return
+        if websockets is None:
+            self.service.logs.append(
+                SignalLog(
+                    ts=datetime.now(timezone.utc),
+                    symbol="system",
+                    address="-",
+                    strategy=StrategyName.SELL_ONLY,
+                    signal=Signal.HOLD,
+                    reason="Birdeye WS disabled: websockets dependency missing",
+                )
+            )
+            self.service.logs = self.service.logs[-500:]
+            self.service.save_state()
+            return
+
+        while True:
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:  # type: ignore[attr-defined]
+                    await self._send_subscriptions(ws)
+                    while True:
+                        raw = await ws.recv()
+                        payload = json.loads(raw) if isinstance(raw, str) else {}
+                        address = self._extract_address(payload)
+                        if address:
+                            await self.service.notify_realtime_event(address)
+            except Exception as exc:
+                self.service.logs.append(
+                    SignalLog(
+                        ts=datetime.now(timezone.utc),
+                        symbol="system",
+                        address="-",
+                        strategy=StrategyName.SELL_ONLY,
+                        signal=Signal.HOLD,
+                        reason=f"Birdeye WS reconnect: {exc}",
+                    )
+                )
+                self.service.logs = self.service.logs[-500:]
+                self.service.save_state()
+                await asyncio.sleep(2)
 
 
 class SignalDispatcher:
@@ -717,6 +808,8 @@ class MonitorService:
         self.dispatcher = SignalDispatcher()
         self.lock = asyncio.Lock()
         self.state_path = Path(os.getenv("STATE_FILE", "data/state.json"))
+        self.realtime_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._last_realtime_process_ts: dict[str, float] = {}
 
     @staticmethod
     def _dt_to_str(value: datetime | None) -> str | None:
@@ -838,134 +931,158 @@ class MonitorService:
             token = TokenRecord(network=req.network.lower(), address=req.address, symbol=req.symbol)
             self.tokens[req.address] = token
             self.save_state()
+            await self.notify_realtime_event(req.address)
             return token
+
+
+    async def get_token_addresses(self) -> list[str]:
+        async with self.lock:
+            return list(self.tokens.keys())
+
+    async def notify_realtime_event(self, address: str) -> None:
+        await self.realtime_queue.put(address)
+
+    async def process_realtime_event(self, address: str) -> None:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        last = self._last_realtime_process_ts.get(address, 0.0)
+        if now_ts - last < 5.0:
+            return
+        self._last_realtime_process_ts[address] = now_ts
+        async with self.lock:
+            token = self.tokens.get(address)
+        if token is None:
+            return
+        await self._process_token(token)
+
+    async def _process_token(self, token: TokenRecord) -> None:
+        try:
+            meta = await self.market_data.fetch_token_meta(token.network, token.address)
+            token.fdv = meta["fdv"]
+            token.price = meta["price"]
+            pool_created = meta.get("pool_created_at")
+            parsed_pool_created = parse_cg_datetime(pool_created)
+            if parsed_pool_created:
+                token.pool_created_at = parsed_pool_created
+            elif token.pool_created_at is None:
+                parsed_created = parse_cg_datetime(meta.get("created_at"))
+                if parsed_created:
+                    token.pool_created_at = parsed_created
+
+            await self._handle_whitelist_exit(token)
+            if token.address in self.blacklist:
+                return
+
+            # runtime now monitors on 1m candles
+            ohlcv = await self.market_data.fetch_ohlcv(token.network, token.address)
+            closes = [float(row[4]) for row in ohlcv if len(row) >= 5]
+            if len(closes) < 30:
+                return
+            ema9_vals = ema(closes, 9)
+            ema20_vals = ema(closes, 20)
+            rsi_vals = rsi(closes, 9)
+            if len(rsi_vals) < 2:
+                return
+            ema9_now = ema9_vals[-1]
+            ema20_now = ema20_vals[-1]
+            ema9_prev_1m = ema9_vals[-2] if len(ema9_vals) >= 2 else None
+            ema20_prev_1m = ema20_vals[-2] if len(ema20_vals) >= 2 else None
+            close = closes[-1]
+            rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
+            base_age = token.pool_created_at or token.added_at
+            token_age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
+
+            startup_bucket = int(float(ohlcv[-1][0])) // 60 if ohlcv else None
+            ema9_5m = ema20_5m = ema9_5m_prev = ema20_5m_prev = None
+            rsi5_prev = rsi5_now = None
+            close_5m = close
+            close_5m_prev = closes[-2] if len(closes) >= 2 else None
+            close_5m_prev2 = closes[-3] if len(closes) >= 3 else None
+            allow_open_rebound = True
+
+            strategy, signal, reason = self.engine.evaluate(
+                token,
+                closes,
+                ema9_now,
+                ema20_now,
+                rsi_prev,
+                rsi_now,
+                allow_open_rebound,
+                close_5m,
+                ema9_5m,
+                ema20_5m,
+                ema9_5m_prev,
+                ema20_5m_prev,
+                rsi5_prev,
+                rsi5_now,
+                startup_bucket,
+                close_5m_prev,
+                close_5m_prev2,
+                token_age_hours,
+                ema9_prev_1m,
+                ema20_prev_1m,
+            )
+            if signal == Signal.BUY:
+                if strategy == StrategyName.STARTUP:
+                    if token.startup_entry_price is None:
+                        token.startup_entry_price = close
+                    token.position.has_position = token.startup_entry_price is not None
+                else:
+                    if token.rebound_entry_price is None:
+                        token.rebound_entry_price = close
+                    token.position.has_position = token.rebound_entry_price is not None
+            elif signal == Signal.ADD:
+                token.position.has_position = True
+                token.position.added_once = True
+                if token.rebound_add_entry_price is None:
+                    token.rebound_add_entry_price = close
+            elif signal == Signal.SELL:
+                if close > 0 and strategy == StrategyName.STARTUP and token.startup_entry_price and token.startup_entry_price > 0:
+                    token.realized_pnl_sol += (close / token.startup_entry_price) - 1.0
+                elif close > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
+                    legs = [token.rebound_entry_price]
+                    if token.rebound_add_entry_price and token.rebound_add_entry_price > 0:
+                        legs.append(token.rebound_add_entry_price)
+                    token.realized_pnl_sol += sum((close / entry) - 1.0 for entry in legs)
+                token.rebound_entry_price = None
+                token.rebound_add_entry_price = None
+                token.startup_entry_price = None
+                token.startup_last_cross_bucket = 0
+                token.startup_last_entry_cross_bucket = 0
+                token.position.added_once = False
+                token.position.has_position = False
+
+            await self.dispatcher.send(token, signal, reason)
+            self.logs.append(
+                SignalLog(
+                    ts=datetime.now(timezone.utc),
+                    symbol=token.symbol,
+                    address=token.address,
+                    strategy=strategy,
+                    signal=signal,
+                    reason=reason,
+                )
+            )
+            self.logs = self.logs[-500:]
+            self.save_state()
+        except Exception as exc:
+            self.logs.append(
+                SignalLog(
+                    ts=datetime.now(timezone.utc),
+                    symbol=token.symbol,
+                    address=token.address,
+                    strategy=StrategyName.SELL_ONLY,
+                    signal=Signal.HOLD,
+                    reason=f"tick error: {exc}",
+                )
+            )
+            self.save_state()
 
     async def tick(self) -> None:
         async with self.lock:
             tokens = list(self.tokens.values())
 
         for token in tokens:
-            try:
-                meta = await self.market_data.fetch_token_meta(token.network, token.address)
-                token.fdv = meta["fdv"]
-                token.price = meta["price"]
-                pool_created = meta.get("pool_created_at")
-                parsed_pool_created = parse_cg_datetime(pool_created)
-                if parsed_pool_created:
-                    token.pool_created_at = parsed_pool_created
-                elif token.pool_created_at is None:
-                    parsed_created = parse_cg_datetime(meta.get("created_at"))
-                    if parsed_created:
-                        token.pool_created_at = parsed_created
-
-                await self._handle_whitelist_exit(token)
-                if token.address in self.blacklist:
-                    continue
-
-                # runtime now monitors on 1m candles
-                ohlcv = await self.market_data.fetch_ohlcv(token.network, token.address)
-                closes = [float(row[4]) for row in ohlcv if len(row) >= 5]
-                if len(closes) < 30:
-                    continue
-                ema9_vals = ema(closes, 9)
-                ema20_vals = ema(closes, 20)
-                rsi_vals = rsi(closes, 9)
-                if len(rsi_vals) < 2:
-                    continue
-                ema9_now = ema9_vals[-1]
-                ema20_now = ema20_vals[-1]
-                ema9_prev_1m = ema9_vals[-2] if len(ema9_vals) >= 2 else None
-                ema20_prev_1m = ema20_vals[-2] if len(ema20_vals) >= 2 else None
-                close = closes[-1]
-                rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
-                base_age = token.pool_created_at or token.added_at
-                token_age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
-
-                startup_bucket = int(float(ohlcv[-1][0])) // 60 if ohlcv else None
-                ema9_5m = ema20_5m = ema9_5m_prev = ema20_5m_prev = None
-                rsi5_prev = rsi5_now = None
-                close_5m = close
-                close_5m_prev = closes[-2] if len(closes) >= 2 else None
-                close_5m_prev2 = closes[-3] if len(closes) >= 3 else None
-                allow_open_rebound = True
-
-                strategy, signal, reason = self.engine.evaluate(
-                    token,
-                    closes,
-                    ema9_now,
-                    ema20_now,
-                    rsi_prev,
-                    rsi_now,
-                    allow_open_rebound,
-                    close_5m,
-                    ema9_5m,
-                    ema20_5m,
-                    ema9_5m_prev,
-                    ema20_5m_prev,
-                    rsi5_prev,
-                    rsi5_now,
-                    startup_bucket,
-                    close_5m_prev,
-                    close_5m_prev2,
-                    token_age_hours,
-                    ema9_prev_1m,
-                    ema20_prev_1m,
-                )
-                if signal == Signal.BUY:
-                    if strategy == StrategyName.STARTUP:
-                        if token.startup_entry_price is None:
-                            token.startup_entry_price = close
-                        token.position.has_position = token.startup_entry_price is not None
-                    else:
-                        if token.rebound_entry_price is None:
-                            token.rebound_entry_price = close
-                        token.position.has_position = token.rebound_entry_price is not None
-                elif signal == Signal.ADD:
-                    token.position.has_position = True
-                    token.position.added_once = True
-                    if token.rebound_add_entry_price is None:
-                        token.rebound_add_entry_price = close
-                elif signal == Signal.SELL:
-                    if close > 0 and strategy == StrategyName.STARTUP and token.startup_entry_price and token.startup_entry_price > 0:
-                        token.realized_pnl_sol += (close / token.startup_entry_price) - 1.0
-                    elif close > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
-                        legs = [token.rebound_entry_price]
-                        if token.rebound_add_entry_price and token.rebound_add_entry_price > 0:
-                            legs.append(token.rebound_add_entry_price)
-                        token.realized_pnl_sol += sum((close / entry) - 1.0 for entry in legs)
-                    token.rebound_entry_price = None
-                    token.rebound_add_entry_price = None
-                    token.startup_entry_price = None
-                    token.startup_last_cross_bucket = 0
-                    token.startup_last_entry_cross_bucket = 0
-                    token.position.added_once = False
-                    token.position.has_position = False
-
-                await self.dispatcher.send(token, signal, reason)
-                self.logs.append(
-                    SignalLog(
-                        ts=datetime.now(timezone.utc),
-                        symbol=token.symbol,
-                        address=token.address,
-                        strategy=strategy,
-                        signal=signal,
-                        reason=reason,
-                    )
-                )
-                self.logs = self.logs[-500:]
-                self.save_state()
-            except Exception as exc:
-                self.logs.append(
-                    SignalLog(
-                        ts=datetime.now(timezone.utc),
-                        symbol=token.symbol,
-                        address=token.address,
-                        strategy=StrategyName.SELL_ONLY,
-                        signal=Signal.HOLD,
-                        reason=f"tick error: {exc}",
-                    )
-                )
-                self.save_state()
+            await self._process_token(token)
 
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         too_low_fdv = token.fdv is not None and token.fdv < 20000
@@ -1012,6 +1129,7 @@ def seconds_until_next_tick(now_ts: int | None = None, interval_seconds: int = 3
 
 
 service = MonitorService()
+ws_consumer = BirdeyeWebSocketConsumer(service)
 app = FastAPI(title="SOL New Token Monitor")
 templates = Jinja2Templates(directory="templates")
 
@@ -1020,7 +1138,7 @@ templates = Jinja2Templates(directory="templates")
 async def startup() -> None:
     service.load_state()
 
-    async def loop() -> None:
+    async def periodic_reconcile_loop() -> None:
         buffer_raw = os.getenv("MONITOR_TICK_BUFFER_SECONDS", "5")
         try:
             buffer_seconds = max(0, int(buffer_raw))
@@ -1032,7 +1150,15 @@ async def startup() -> None:
             sleep_seconds = seconds_until_next_tick(interval_seconds=60, buffer_seconds=buffer_seconds)
             await asyncio.sleep(sleep_seconds)
 
-    asyncio.create_task(loop())
+    async def realtime_signal_loop() -> None:
+        # WS drives the trading-signal main path; periodic_reconcile_loop handles补数/对账.
+        while True:
+            address = await service.realtime_queue.get()
+            await service.process_realtime_event(address)
+
+    asyncio.create_task(periodic_reconcile_loop())
+    asyncio.create_task(realtime_signal_loop())
+    asyncio.create_task(ws_consumer.run_forever())
 
 
 @app.post("/webhook/add-token")

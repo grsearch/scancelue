@@ -14,7 +14,7 @@
   - 若退出时仍有持仓，则先发送 SELL webhook，再移入黑名单。
 - 提供 Dashboard：`GET /dashboard`（含当前盈亏与历史总盈亏）
 - `GET /dashboard/backtest`（白名单代币过去24小时回测：反弹策略/趋势策略）
-- 说明：当前实现使用 Birdeye REST 拉取 OHLCV；Birdeye WebSocket（Premium Plus 支持）可用于后续低延迟连续订阅扩展。
+- 说明：当前实现已采用“WebSocket 主链路 + REST 辅助”模式：Birdeye WebSocket 触发实时信号评估，Birdeye REST 用于启动预热、断线补K与对账。
 - 白名单/黑名单与信号日志会持久化到本地文件，服务重启后自动恢复。
 
 ## 快速启动
@@ -30,6 +30,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 3003
 
 - `BIRDEYE_API_KEY`：Birdeye API key（推荐配置）
 - `BIRDEYE_BASE_URL`：默认 `https://public-api.birdeye.so`
+- `BIRDEYE_WS_ENABLED`：是否启用 Birdeye WebSocket（`1` 启用，默认 `1`）
+- `BIRDEYE_WS_URL`：Birdeye WebSocket 地址，默认 `wss://public-api.birdeye.so/socket`
 - `BUY_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/webhook/new-token`
 - `SELL_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/force-sell`
 - `STATE_FILE`：持久化状态文件路径，默认 `data/state.json`
