@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
 
 import httpx
@@ -279,7 +280,7 @@ class BirdeyeWebSocketConsumer:
 
     def __init__(self, service: "MonitorService") -> None:
         self.service = service
-        self.ws_url = os.getenv("BIRDEYE_WS_URL", "wss://public-api.birdeye.so/socket")
+        self.ws_url = os.getenv("BIRDEYE_WS_URL", "wss://public-api.birdeye.so/socket/solana")
         self.enabled = os.getenv("BIRDEYE_WS_ENABLED", "1") == "1"
         self._last_error_log_ts: float = 0.0
 
@@ -299,6 +300,26 @@ class BirdeyeWebSocketConsumer:
             except Exception:
                 pass
         return headers
+    @staticmethod
+    def _key_fingerprint(raw_key: str) -> str:
+        key = raw_key.strip()
+        if not key:
+            return "empty"
+        prefix = key[:6]
+        suffix = key[-4:] if len(key) >= 4 else key
+        return f"{prefix}...{suffix} len={len(key)} trim_changed={raw_key != key}"
+
+    def _build_ws_url(self) -> tuple[str, str]:
+        raw_key = os.getenv("BIRDEYE_API_KEY", "")
+        api_key = raw_key.strip()
+        parts = urlsplit(self.ws_url)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        if api_key:
+            query["x-api-key"] = api_key
+        new_query = urlencode(query)
+        ws_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+        return ws_url, self._key_fingerprint(raw_key)
+
 
     @staticmethod
     def _extract_address(payload: Any) -> str | None:
@@ -353,11 +374,29 @@ class BirdeyeWebSocketConsumer:
 
         while True:
             try:
+                ws_url, fingerprint = self._build_ws_url()
+                headers = self._ws_headers()
+                now_ts = datetime.now(timezone.utc).timestamp()
+                if now_ts - self._last_error_log_ts >= 30:
+                    self.service.logs.append(
+                        SignalLog(
+                            ts=datetime.now(timezone.utc),
+                            symbol="system",
+                            address="-",
+                            strategy=StrategyName.SELL_ONLY,
+                            signal=Signal.HOLD,
+                            reason=f"Birdeye WS connect: {self.ws_url} key={fingerprint}",
+                        )
+                    )
+                    self.service.logs = self.service.logs[-500:]
+                    self.service.save_state()
                 async with websockets.connect(  # type: ignore[attr-defined]
-                    self.ws_url,
+                    ws_url,
                     ping_interval=20,
                     ping_timeout=20,
-                    additional_headers=self._ws_headers(),
+                    subprotocols=[os.getenv("BIRDEYE_WS_SUBPROTOCOL", "echo-protocol")],
+                    origin=os.getenv("BIRDEYE_WS_ORIGIN", "ws://public-api.birdeye.so"),
+                    additional_headers=headers,
                 ) as ws:
                     await self._send_subscriptions(ws)
                     while True:

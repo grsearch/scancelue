@@ -31,8 +31,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 3003
 - `BIRDEYE_API_KEY`：Birdeye API key（推荐配置）
 - `BIRDEYE_BASE_URL`：默认 `https://public-api.birdeye.so`
 - `BIRDEYE_WS_ENABLED`：是否启用 Birdeye WebSocket（`1` 启用，默认 `1`）
-- `BIRDEYE_WS_URL`：Birdeye WebSocket 地址，默认 `wss://public-api.birdeye.so/socket`
+- `BIRDEYE_WS_URL`：Birdeye WebSocket 地址，默认 `wss://public-api.birdeye.so/socket/solana`
 - `BIRDEYE_WS_HEADERS_JSON`：可选，WS额外请求头JSON（用于兼容Birdeye网关鉴权）
+- `BIRDEYE_WS_SUBPROTOCOL`：WS子协议，默认 `echo-protocol`
+- `BIRDEYE_WS_ORIGIN`：WS Origin 头，默认 `ws://public-api.birdeye.so`
 - `BUY_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/webhook/new-token`
 - `SELL_WEBHOOK_URL`：默认 `http://43.162.102.148:3002/force-sell`
 - `STATE_FILE`：持久化状态文件路径，默认 `data/state.json`
