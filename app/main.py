@@ -107,6 +107,7 @@ class TokenRecord:
     no_open_mode: bool = False
     no_open_reason: str = ""
     no_open_checked_at: datetime | None = None
+    last_sell_at: datetime | None = None  # 卖出后冷静期：20分钟内禁止开单
 
 
 @dataclass
@@ -613,13 +614,12 @@ class StrategyEngine:
         ema20_1m_prev: float | None = None,
     ) -> tuple[StrategyName, Signal, str]:
         # FIX #2: 用 closes_1m[-2] 作为已确认收盘价，排除活K干扰
-        # closes_1m[-1] 是当前未收盘K线，价格持续变化会造成信号抖动
         close_1m = closes_1m[-2] if len(closes_1m) >= 2 else closes_1m[-1]
         has_rebound = token.rebound_entry_price is not None
 
         if has_rebound:
             entry = token.rebound_entry_price
-            # FIX #4: 止损也用已确认收盘价 close_1m（即 closes[-2]），避免活K抖动
+            # FIX #4: 止损也用已确认收盘价，避免活K抖动
             if (
                 rsi1_now >= 85
                 or cross_down(rsi1_prev, rsi1_now, 75)
@@ -629,8 +629,25 @@ class StrategyEngine:
             ):
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、RSI>=85或跌破首仓90%"
 
-        if (not has_rebound) and cross_up(rsi1_prev, rsi1_now, 30):
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
+        if not has_rebound and cross_up(rsi1_prev, rsi1_now, 30):
+            now_utc = datetime.now(timezone.utc)
+
+            # 实盘过滤1：卖出后20分钟冷静期，禁止开单
+            if token.last_sell_at is not None:
+                cooldown_mins = (now_utc - token.last_sell_at).total_seconds() / 60
+                if cooldown_mins < 20:
+                    return StrategyName.REBOUND, Signal.HOLD, f"卖出冷静期：距上次卖出{cooldown_mins:.1f}分钟，需等满20分钟"
+
+            # 实盘过滤2：EMA间距过滤（间距>15% 或 间距在扩大 则不开单）
+            if ema20_1m > 0 and ema9_1m_prev is not None and ema20_1m_prev is not None and ema20_1m_prev > 0:
+                ema_gap_now = abs(ema9_1m - ema20_1m) / ema20_1m
+                ema_gap_prev = abs(ema9_1m_prev - ema20_1m_prev) / ema20_1m_prev
+                if ema_gap_now > 0.15:
+                    return StrategyName.REBOUND, Signal.HOLD, f"EMA间距过大({ema_gap_now*100:.1f}%)，趋势过强不开单"
+                if ema_gap_now >= ema_gap_prev:
+                    return StrategyName.REBOUND, Signal.HOLD, f"EMA间距扩大中({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
+
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA间距收窄"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -658,6 +675,8 @@ class BacktestConfig:
     filter3_vol_ratio: float = 1.5     # 放量判断倍数（均量倍数）
     filter3_min_interval: int = 20     # 两次买入最小间隔（K线数）
     filter3_rsi_strength: float = 60.0 # 近期RSI最高值门槛
+    filter3_ema_gap_max: float = 0.15    # EMA间距上限（超过则不买）
+    filter3_ema_gap_narrowing: bool = True  # 是否要求间距收窄
 
 
 @dataclass
@@ -716,6 +735,8 @@ BACKTEST_CONFIGS = [
         filter3_vol_ratio=1.5,
         filter3_min_interval=20,
         filter3_rsi_strength=60.0,
+        filter3_ema_gap_max=0.15,
+        filter3_ema_gap_narrowing=True,
     ),
 ]
 
@@ -863,7 +884,19 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     # --- 两次买入最小间隔（过滤RSI钝化连发）---
                     interval_ok = (last_buy_bar < 0) or (i - last_buy_bar >= config.filter3_min_interval)
 
-                    allow_buy = is_ranging_or_up and drop_ok and vol_ok and price_stable and interval_ok
+                    # --- EMA间距过滤 ---
+                    if ema20_now > 0 and i >= 5:
+                        ema_gap_now_pct = abs(ema9_now - ema20_now) / ema20_now
+                        ema20_prev5 = ema20_vals[i - 5]
+                        ema9_prev5 = ema9_vals[i - 5]
+                        ema_gap_prev_pct = abs(ema9_prev5 - ema20_prev5) / ema20_prev5 if ema20_prev5 > 0 else ema_gap_now_pct
+                        gap_ok = ema_gap_now_pct <= config.filter3_ema_gap_max
+                        gap_narrowing = (not config.filter3_ema_gap_narrowing) or (ema_gap_now_pct < ema_gap_prev_pct)
+                        ema_gap_ok = gap_ok and gap_narrowing
+                    else:
+                        ema_gap_ok = True
+
+                    allow_buy = is_ranging_or_up and drop_ok and vol_ok and price_stable and interval_ok and ema_gap_ok
 
                 if allow_buy:
                     first_entry = close_now
@@ -1000,6 +1033,7 @@ class MonitorService:
             "no_open_mode": token.no_open_mode,
             "no_open_reason": token.no_open_reason,
             "no_open_checked_at": self._dt_to_str(token.no_open_checked_at),
+            "last_sell_at": self._dt_to_str(token.last_sell_at),
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -1040,6 +1074,7 @@ class MonitorService:
             no_open_mode=bool(payload.get("no_open_mode", False)),
             no_open_reason=str(payload.get("no_open_reason", "")),
             no_open_checked_at=parse_cg_datetime(payload.get("no_open_checked_at")),
+            last_sell_at=parse_cg_datetime(payload.get("last_sell_at")),
         )
 
     def save_state(self) -> None:
@@ -1225,6 +1260,7 @@ class MonitorService:
                 token.startup_last_entry_cross_bucket = 0
                 token.position.added_once = False
                 token.position.has_position = False
+                token.last_sell_at = datetime.now(timezone.utc)  # 记录卖出时间，触发20分钟冷静期
 
             await self.dispatcher.send(token, signal, reason)
             self.logs.append(
