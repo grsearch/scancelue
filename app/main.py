@@ -153,10 +153,10 @@ class BirdeyeClient:
         network: str,
         token: str,
         timeframe: str = "minute",
-        limit: int = 200,
+        # FIX #1: 默认拉500根K线，减少新币早期RSI噪声
+        limit: int = 500,
         before_timestamp: int | None = None,
     ) -> list[list[float]]:
-        # Birdeye OHLCV endpoint
         tf_map = {"minute": "1m", "hour": "1h", "day": "1d"}
         ohlcv_type = tf_map.get(timeframe, timeframe)
         now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -227,7 +227,6 @@ class BirdeyeClient:
             "created_at": created_at,
         }
 
-
     async def fetch_ohlcv_24h(self, network: str, token: str) -> list[list[float]]:
         """Fetch up to ~24h minute bars using paginated requests compatible with endpoint limits."""
         now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -235,7 +234,6 @@ class BirdeyeClient:
 
         all_rows: list[list[float]] = []
         before_ts: int | None = None
-        # try conservative limits first to avoid 400 limit errors
         candidate_limits = [1000, 500, 200]
 
         for _ in range(4):
@@ -252,7 +250,7 @@ class BirdeyeClient:
                     )
                     last_exc = None
                     break
-                except Exception as exc:  # degrade limit and retry
+                except Exception as exc:
                     last_exc = exc
                     continue
 
@@ -267,7 +265,6 @@ class BirdeyeClient:
                 break
             before_ts = oldest_ts - 1
 
-        # dedupe by ts and keep last 24h
         dedup: dict[int, list[float]] = {}
         for row in all_rows:
             dedup[int(float(row[0]))] = row
@@ -284,7 +281,9 @@ class BirdeyeWebSocketConsumer:
         self.enabled = os.getenv("BIRDEYE_WS_ENABLED", "1") == "1"
         self._last_error_log_ts: float = 0.0
 
-    def _ws_headers(self) -> dict[str, str]:
+    def _ws_headers(self) -> list[tuple[str, str]]:
+        # FIX #3: 返回 list of tuples，websockets 库正确识别此格式
+        # dict 在 websockets 12.x 会被静默忽略导致 403
         headers: dict[str, str] = {}
         api_key = os.getenv("BIRDEYE_API_KEY", "").strip()
         if api_key:
@@ -299,7 +298,8 @@ class BirdeyeWebSocketConsumer:
                             headers[k] = str(v)
             except Exception:
                 pass
-        return headers
+        return list(headers.items())
+
     @staticmethod
     def _key_fingerprint(raw_key: str) -> str:
         key = raw_key.strip()
@@ -310,16 +310,9 @@ class BirdeyeWebSocketConsumer:
         return f"{prefix}...{suffix} len={len(key)} trim_changed={raw_key != key}"
 
     def _build_ws_url(self) -> tuple[str, str]:
+        # FIX #3: 不把 API key 放进 query string，只走 header
         raw_key = os.getenv("BIRDEYE_API_KEY", "")
-        api_key = raw_key.strip()
-        parts = urlsplit(self.ws_url)
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        if api_key:
-            query["x-api-key"] = api_key
-        new_query = urlencode(query)
-        ws_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
-        return ws_url, self._key_fingerprint(raw_key)
-
+        return self.ws_url, self._key_fingerprint(raw_key)
 
     @staticmethod
     def _extract_address(payload: Any) -> str | None:
@@ -342,7 +335,6 @@ class BirdeyeWebSocketConsumer:
         addresses = await self.service.get_token_addresses()
         if not addresses:
             return
-        # Send a few compatible subscription formats for Birdeye WS variants.
         messages = [
             {"type": "SUBSCRIBE_PRICE", "data": {"addresses": addresses}},
             {"type": "SUBSCRIBE_OHLCV", "data": {"type": "1m", "addresses": addresses}},
@@ -375,6 +367,7 @@ class BirdeyeWebSocketConsumer:
         while True:
             try:
                 ws_url, fingerprint = self._build_ws_url()
+                # FIX #3: headers 现在是 list of tuples，websockets 正确传入握手 header
                 headers = self._ws_headers()
                 now_ts = datetime.now(timezone.utc).timestamp()
                 if now_ts - self._last_error_log_ts >= 30:
@@ -385,7 +378,7 @@ class BirdeyeWebSocketConsumer:
                             address="-",
                             strategy=StrategyName.SELL_ONLY,
                             signal=Signal.HOLD,
-                            reason=f"Birdeye WS connect: {self.ws_url} key={fingerprint}",
+                            reason=f"Birdeye WS connect: {self.ws_url} key={fingerprint} header_keys={[k for k,v in headers]}",
                         )
                     )
                     self.service.logs = self.service.logs[-500:]
@@ -396,6 +389,7 @@ class BirdeyeWebSocketConsumer:
                     ping_timeout=20,
                     subprotocols=[os.getenv("BIRDEYE_WS_SUBPROTOCOL", "echo-protocol")],
                     origin=os.getenv("BIRDEYE_WS_ORIGIN", "ws://public-api.birdeye.so"),
+                    # FIX #3: list of tuples 才能被 websockets 12.x 正确识别
                     additional_headers=headers,
                 ) as ws:
                     await self._send_subscriptions(ws)
@@ -526,7 +520,6 @@ def resample_5m_closes(ohlcv: list[list[float]]) -> list[tuple[int, float]]:
         buckets.setdefault(bucket, []).append(close)
     out: list[tuple[int, float]] = []
     for b in sorted(buckets):
-        # liquidity-tolerant mode: keep 5m bucket even if fewer than 5x1m bars arrived
         if buckets[b]:
             out.append((b, buckets[b][-1]))
     return out
@@ -598,30 +591,35 @@ class StrategyEngine:
         rsi1_prev: float,
         rsi1_now: float,
         allow_open_rebound: bool,
-        close_5m: float | None,
-        ema9_5m: float | None,
-        ema20_5m: float | None,
-        ema9_5m_prev: float | None,
-        ema20_5m_prev: float | None,
-        rsi5_prev: float | None,
-        rsi5_now: float | None,
-        startup_bucket: int | None,
+        # FIX #5: 保留参数签名兼容性，但标注为未使用
+        close_5m: float | None = None,
+        ema9_5m: float | None = None,
+        ema20_5m: float | None = None,
+        ema9_5m_prev: float | None = None,
+        ema20_5m_prev: float | None = None,
+        rsi5_prev: float | None = None,
+        rsi5_now: float | None = None,
+        startup_bucket: int | None = None,
         close_5m_prev: float | None = None,
         close_5m_prev2: float | None = None,
         token_age_hours: float | None = None,
         ema9_1m_prev: float | None = None,
         ema20_1m_prev: float | None = None,
     ) -> tuple[StrategyName, Signal, str]:
-        close_1m = closes_1m[-1]
+        # FIX #2: 用 closes_1m[-2] 作为已确认收盘价，排除活K干扰
+        # closes_1m[-1] 是当前未收盘K线，价格持续变化会造成信号抖动
+        close_1m = closes_1m[-2] if len(closes_1m) >= 2 else closes_1m[-1]
         has_rebound = token.rebound_entry_price is not None
 
         if has_rebound:
+            entry = token.rebound_entry_price
+            # FIX #4: 止损也用已确认收盘价 close_1m（即 closes[-2]），避免活K抖动
             if (
                 rsi1_now >= 85
                 or cross_down(rsi1_prev, rsi1_now, 75)
                 or cross_down(rsi1_prev, rsi1_now, 70)
                 or cross_down(rsi1_prev, rsi1_now, 65)
-                or (token.rebound_entry_price is not None and close_1m <= token.rebound_entry_price * 0.90)
+                or (entry is not None and close_1m <= entry * 0.90)
             ):
                 return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、RSI>=85或跌破首仓90%"
 
@@ -629,7 +627,6 @@ class StrategyEngine:
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
-
 
 
 @dataclass
@@ -854,7 +851,6 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     )
 
 def format_pool_age(pool_created_at: datetime | None, now: datetime | None = None, added_at: datetime | None = None) -> str:
-    """Dashboard AGE prefers pool_created_at; falls back to whitelist added_at before metadata is ready."""
     base = pool_created_at or added_at
     if base is None:
         return "N/A"
@@ -1001,7 +997,6 @@ class MonitorService:
             await self.notify_realtime_event(req.address)
             return token
 
-
     async def get_token_addresses(self) -> list[str]:
         async with self.lock:
             return list(self.tokens.keys())
@@ -1013,6 +1008,12 @@ class MonitorService:
         now_ts = datetime.now(timezone.utc).timestamp()
         last = self._last_realtime_process_ts.get(address, 0.0)
         if now_ts - last < 5.0:
+            # FIX: 被抑制的事件不直接丢弃，而是重新入队延迟处理
+            # 避免 RSI 穿越恰好落在抑制窗口内时信号永久丢失
+            async def _reschedule() -> None:
+                await asyncio.sleep(5.0)
+                await self.realtime_queue.put(address)
+            asyncio.create_task(_reschedule())
             return
         self._last_realtime_process_ts[address] = now_ts
         async with self.lock:
@@ -1039,22 +1040,30 @@ class MonitorService:
             if token.address in self.blacklist:
                 return
 
-            # runtime now monitors on 1m candles
-            ohlcv = await self.market_data.fetch_ohlcv(token.network, token.address)
+            # FIX #1: 拉取更多K线（500根），减少RSI预热期噪声
+            ohlcv = await self.market_data.fetch_ohlcv(token.network, token.address, limit=500)
             closes = [float(row[4]) for row in ohlcv if len(row) >= 5]
-            if len(closes) < 11:
+            # 至少需要 20 根已确认K线（排除活K后还有足够数据）
+            if len(closes) < 20:
                 return
             ema9_vals = ema(closes, 9)
             ema20_vals = ema(closes, 20)
             rsi_vals = rsi(closes, 9)
-            if len(rsi_vals) < 2:
+            # FIX #2: 至少需要3个RSI值，才能用[-3]和[-2]（排除活K）
+            if len(rsi_vals) < 3:
                 return
             ema9_now = ema9_vals[-1]
             ema20_now = ema20_vals[-1]
             ema9_prev_1m = ema9_vals[-2] if len(ema9_vals) >= 2 else None
             ema20_prev_1m = ema20_vals[-2] if len(ema20_vals) >= 2 else None
-            close = closes[-1]
-            rsi_prev, rsi_now = rsi_vals[-2], rsi_vals[-1]
+
+            # FIX #2 & #4: 使用已确认K线的RSI（排除最后一根活K）
+            # rsi_vals[-1] 对应活K，rsi_vals[-2]/[-3] 对应已收盘K线
+            rsi_prev = rsi_vals[-3]
+            rsi_now = rsi_vals[-2]
+            # 已确认收盘价（排除活K）
+            close = closes[-2]
+
             base_age = token.pool_created_at or token.added_at
             token_age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
 
@@ -1062,8 +1071,8 @@ class MonitorService:
             ema9_5m = ema20_5m = ema9_5m_prev = ema20_5m_prev = None
             rsi5_prev = rsi5_now = None
             close_5m = close
-            close_5m_prev = closes[-2] if len(closes) >= 2 else None
-            close_5m_prev2 = closes[-3] if len(closes) >= 3 else None
+            close_5m_prev = closes[-3] if len(closes) >= 3 else None
+            close_5m_prev2 = closes[-4] if len(closes) >= 4 else None
             allow_open_rebound = True
 
             strategy, signal, reason = self.engine.evaluate(
@@ -1088,6 +1097,10 @@ class MonitorService:
                 ema9_prev_1m,
                 ema20_prev_1m,
             )
+
+            # 记录当前 RSI 到 token（用于 dashboard 展示）
+            token.last_rsi = rsi_now
+
             if signal == Signal.BUY:
                 if strategy == StrategyName.STARTUP:
                     if token.startup_entry_price is None:
@@ -1218,7 +1231,6 @@ async def startup() -> None:
             await asyncio.sleep(sleep_seconds)
 
     async def realtime_signal_loop() -> None:
-        # WS drives the trading-signal main path; periodic_reconcile_loop handles补数/对账.
         while True:
             address = await service.realtime_queue.get()
             await service.process_realtime_event(address)
@@ -1268,6 +1280,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
                 "pnl": current_pnl_text,
                 "total_pnl": total_pnl_text,
+                "last_rsi": f"{t.last_rsi:.1f}" if t.last_rsi is not None else "N/A",
             }
         )
     logs = [
