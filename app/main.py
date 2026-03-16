@@ -281,6 +281,24 @@ class BirdeyeWebSocketConsumer:
         self.service = service
         self.ws_url = os.getenv("BIRDEYE_WS_URL", "wss://public-api.birdeye.so/socket")
         self.enabled = os.getenv("BIRDEYE_WS_ENABLED", "1") == "1"
+        self._last_error_log_ts: float = 0.0
+
+    def _ws_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        api_key = os.getenv("BIRDEYE_API_KEY", "").strip()
+        if api_key:
+            headers["x-api-key"] = api_key
+        extra_raw = os.getenv("BIRDEYE_WS_HEADERS_JSON", "").strip()
+        if extra_raw:
+            try:
+                extra = json.loads(extra_raw)
+                if isinstance(extra, dict):
+                    for k, v in extra.items():
+                        if isinstance(k, str) and isinstance(v, (str, int, float)):
+                            headers[k] = str(v)
+            except Exception:
+                pass
+        return headers
 
     @staticmethod
     def _extract_address(payload: Any) -> str | None:
@@ -335,7 +353,12 @@ class BirdeyeWebSocketConsumer:
 
         while True:
             try:
-                async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:  # type: ignore[attr-defined]
+                async with websockets.connect(  # type: ignore[attr-defined]
+                    self.ws_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    additional_headers=self._ws_headers(),
+                ) as ws:
                     await self._send_subscriptions(ws)
                     while True:
                         raw = await ws.recv()
@@ -344,18 +367,21 @@ class BirdeyeWebSocketConsumer:
                         if address:
                             await self.service.notify_realtime_event(address)
             except Exception as exc:
-                self.service.logs.append(
-                    SignalLog(
-                        ts=datetime.now(timezone.utc),
-                        symbol="system",
-                        address="-",
-                        strategy=StrategyName.SELL_ONLY,
-                        signal=Signal.HOLD,
-                        reason=f"Birdeye WS reconnect: {exc}",
+                now_ts = datetime.now(timezone.utc).timestamp()
+                if now_ts - self._last_error_log_ts >= 30:
+                    self._last_error_log_ts = now_ts
+                    self.service.logs.append(
+                        SignalLog(
+                            ts=datetime.now(timezone.utc),
+                            symbol="system",
+                            address="-",
+                            strategy=StrategyName.SELL_ONLY,
+                            signal=Signal.HOLD,
+                            reason=f"Birdeye WS reconnect: {exc}",
+                        )
                     )
-                )
-                self.service.logs = self.service.logs[-500:]
-                self.service.save_state()
+                    self.service.logs = self.service.logs[-500:]
+                    self.service.save_state()
                 await asyncio.sleep(2)
 
 
