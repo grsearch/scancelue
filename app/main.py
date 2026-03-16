@@ -278,7 +278,8 @@ class BirdeyeWebSocketConsumer:
     def __init__(self, service: "MonitorService") -> None:
         self.service = service
         self.ws_url = os.getenv("BIRDEYE_WS_URL", "wss://public-api.birdeye.so/socket/solana")
-        self.enabled = os.getenv("BIRDEYE_WS_ENABLED", "1") == "1"
+        # WS 默认关闭，使用1分钟REST轮询作为主链路，避免WS鉴权问题
+        self.enabled = os.getenv("BIRDEYE_WS_ENABLED", "0") == "1"
         self._last_error_log_ts: float = 0.0
 
     def _ws_headers(self) -> list[tuple[str, str]]:
@@ -387,9 +388,6 @@ class BirdeyeWebSocketConsumer:
                     ws_url,
                     ping_interval=20,
                     ping_timeout=20,
-                    subprotocols=[os.getenv("BIRDEYE_WS_SUBPROTOCOL", "echo-protocol")],
-                    origin=os.getenv("BIRDEYE_WS_ORIGIN", "https://public-api.birdeye.so"),
-                    # FIX #3: list of tuples 才能被 websockets 12.x 正确识别
                     additional_headers=headers,
                 ) as ws:
                     await self._send_subscriptions(ws)
