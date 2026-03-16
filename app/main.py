@@ -388,7 +388,7 @@ class BirdeyeWebSocketConsumer:
                     ping_interval=20,
                     ping_timeout=20,
                     subprotocols=[os.getenv("BIRDEYE_WS_SUBPROTOCOL", "echo-protocol")],
-                    origin=os.getenv("BIRDEYE_WS_ORIGIN", "ws://public-api.birdeye.so"),
+                    origin=os.getenv("BIRDEYE_WS_ORIGIN", "https://public-api.birdeye.so"),
                     # FIX #3: list of tuples 才能被 websockets 12.x 正确识别
                     additional_headers=headers,
                 ) as ws:
