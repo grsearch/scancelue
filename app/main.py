@@ -649,6 +649,15 @@ class BacktestConfig:
     sell_cross_70: bool = True
     sell_cross_75: bool = True
     overbought_rsi: float = 85.0
+    # 反弹策略3 前置过滤条件
+    use_filter3: bool = False          # 是否启用四条前置条件
+    filter3_min_drop_ranging: float = 0.20   # 震荡结构最小跌幅
+    filter3_min_drop_trending: float = 0.30  # 趋势结构最小跌幅
+    filter3_lookback_high: int = 60    # 前高回看窗口（根K线数）
+    filter3_stability_bars: int = 3    # 价格企稳判断K线数
+    filter3_vol_ratio: float = 1.5     # 放量判断倍数（均量倍数）
+    filter3_min_interval: int = 20     # 两次买入最小间隔（K线数）
+    filter3_rsi_strength: float = 60.0 # 近期RSI最高值门槛
 
 
 @dataclass
@@ -686,6 +695,27 @@ BACKTEST_CONFIGS = [
         sell_cross_70=True,
         sell_cross_75=True,
         overbought_rsi=85.0,
+    ),
+    BacktestConfig(
+        name="反弹策略3",
+        mode="rebound",
+        candle_minutes=1,
+        require_open_gate=False,
+        buy_rsi_threshold=30.0,
+        enable_add=False,
+        stop_loss_pct=0.90,
+        sell_cross_65=True,
+        sell_cross_70=True,
+        sell_cross_75=True,
+        overbought_rsi=85.0,
+        use_filter3=True,
+        filter3_min_drop_ranging=0.20,
+        filter3_min_drop_trending=0.30,
+        filter3_lookback_high=60,
+        filter3_stability_bars=3,
+        filter3_vol_ratio=1.5,
+        filter3_min_interval=20,
+        filter3_rsi_strength=60.0,
     ),
 ]
 
@@ -735,6 +765,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     added_once = False
     realized = 0.0
     trades = 0
+    last_buy_bar: int = -999  # 反弹策略3：记录上次买入K线索引
 
     for i in range(2, len(tf_rows)):
         ts = tf_rows[i][0]
@@ -781,10 +812,65 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     continue
 
             if (not has_pos) and cross_up(rsi_prev, rsi_now, config.buy_rsi_threshold):
-                first_entry = close_now
-                add_entry = None
-                added_once = False
-                trades += 1
+                # 反弹策略3：四条前置过滤条件
+                allow_buy = True
+                if config.use_filter3 and i >= config.filter3_lookback_high:
+                    # --- 条件1：区分结构（震荡/震荡上升 vs 单边下跌）---
+                    # 近30根内价格有没有创新低（如果一直创新低说明单边下跌，不买）
+                    window_lows = lows[max(0, i - 30):i]
+                    is_still_making_lows = (
+                        len(window_lows) >= 5
+                        and min(window_lows[-5:]) < min(window_lows[:5]) * 0.97
+                    )
+                    # 近期RSI最高值要超过60（归零币RSI永远涨不上去）
+                    rsi_window = rsi_vals[max(0, i - 30):i]
+                    rsi_max_recent = max(rsi_window) if rsi_window else 0.0
+                    rsi_has_strength = rsi_max_recent >= config.filter3_rsi_strength
+                    is_ranging_or_up = (not is_still_making_lows) and rsi_has_strength
+
+                    # --- 条件2：跌幅门槛 ---
+                    lookback = min(config.filter3_lookback_high, i)
+                    recent_high = max(closes[i - lookback:i]) if lookback > 0 else close_now
+                    drop_pct = (recent_high - close_now) / recent_high if recent_high > 0 else 0.0
+                    min_drop = config.filter3_min_drop_ranging if is_ranging_or_up else config.filter3_min_drop_trending
+                    drop_ok = drop_pct >= min_drop
+
+                    # --- 条件3：买点前有放量下跌（最好有，没有也允许但量不能在放大）---
+                    vol_window = vols[max(0, i - 10):i]
+                    vol_avg = sum(vol_window) / len(vol_window) if vol_window else 0.0
+                    # 近5根有没有放量阴线（量 > 均量1.5倍 且 是阴线）
+                    had_vol_drop = False
+                    for j in range(max(1, i - 5), i):
+                        if j < len(closes) and j < len(vols):
+                            if closes[j] < closes[j - 1] and vols[j] > vol_avg * config.filter3_vol_ratio:
+                                had_vol_drop = True
+                                break
+                    # 退而求其次：当前量能没有持续放大也可以接受
+                    recent_vol3 = sum(vols[max(0, i - 3):i]) / 3 if i >= 3 else vol_avg
+                    prev_vol5 = sum(vols[max(0, i - 8):i - 3]) / 5 if i >= 8 else vol_avg
+                    vol_not_expanding = recent_vol3 <= prev_vol5 * 1.2
+                    vol_ok = had_vol_drop or vol_not_expanding
+
+                    # --- 条件4：价格企稳（最近N根K线不再创新低）---
+                    stab = config.filter3_stability_bars
+                    if i >= stab + 1:
+                        stab_lows = lows[i - stab:i]
+                        prev_low = lows[i - stab - 1]
+                        price_stable = all(l >= prev_low * 0.995 for l in stab_lows)
+                    else:
+                        price_stable = False
+
+                    # --- 两次买入最小间隔（过滤RSI钝化连发）---
+                    interval_ok = (last_buy_bar < 0) or (i - last_buy_bar >= config.filter3_min_interval)
+
+                    allow_buy = is_ranging_or_up and drop_ok and vol_ok and price_stable and interval_ok
+
+                if allow_buy:
+                    first_entry = close_now
+                    add_entry = None
+                    added_once = False
+                    last_buy_bar = i
+                    trades += 1
 
         elif config.mode == "trend":
             startup_recent = False
@@ -1178,7 +1264,7 @@ class MonitorService:
         too_low_lp = token.liquidity is not None and token.liquidity < 10000
         base_age = token.pool_created_at or token.added_at
         age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
-        too_old = age_hours > 6
+        too_old = age_hours > 12
         if not (too_low_fdv or too_low_lp or too_old):
             return
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:
