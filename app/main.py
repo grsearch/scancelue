@@ -593,6 +593,7 @@ class StrategyEngine:
     def evaluate(
         token: TokenRecord,
         closes_1m: list[float],
+        volumes_1m: list[float] | None,
         ema9_1m: float,
         ema20_1m: float,
         rsi1_prev: float,
@@ -647,7 +648,15 @@ class StrategyEngine:
                 if ema_gap_now >= ema_gap_prev:
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距扩大中({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
 
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA间距收窄"
+            # 实盘过滤3：量能萎缩（买点前3根均量 < 前7根均量的70%）
+            # 防止在放量下跌途中买入
+            if volumes_1m is not None and len(volumes_1m) >= 11:
+                buy_vol3 = sum(volumes_1m[-4:-1]) / 3      # 买点附近3根均量（排除活K）
+                ref_vol7 = sum(volumes_1m[-11:-4]) / 7     # 更早的7根参考均量
+                if ref_vol7 > 0 and buy_vol3 > ref_vol7 * 0.7:
+                    return StrategyName.REBOUND, Signal.HOLD, f"量能未萎缩(近3根={buy_vol3:.0f} > 参考均量*70%={ref_vol7*0.7:.0f})，卖压未减弱"
+
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+量能萎缩"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -714,17 +723,17 @@ BACKTEST_CONFIGS = [
         sell_cross_70=True,
         sell_cross_75=True,
         overbought_rsi=85.0,
-        # 与实盘策略保持一致：EMA间距过滤
+        # 与实盘策略保持一致：EMA间距过滤 + 量能萎缩 + 价格企稳
         use_filter3=True,
-        filter3_min_drop_ranging=0.0,
+        filter3_min_drop_ranging=0.0,   # 跌幅不限制（与实盘一致）
         filter3_min_drop_trending=0.0,
         filter3_lookback_high=60,
-        filter3_stability_bars=1,
-        filter3_vol_ratio=999.0,
-        filter3_min_interval=20,
-        filter3_rsi_strength=0.0,
-        filter3_ema_gap_max=0.15,
-        filter3_ema_gap_narrowing=True,
+        filter3_stability_bars=3,       # 价格企稳：最近3根不创新低
+        filter3_vol_ratio=1.5,          # 量能萎缩：买点前3根 < 参考均量70%
+        filter3_min_interval=20,        # 两次买入间隔≥20根K线
+        filter3_rsi_strength=0.0,       # RSI强度不限制
+        filter3_ema_gap_max=0.15,       # EMA间距≤15%
+        filter3_ema_gap_narrowing=True, # EMA间距必须收窄
     ),
     BacktestConfig(
         name="反弹策略3",
@@ -883,14 +892,25 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     vol_not_expanding = recent_vol3 <= prev_vol5 * 1.2
                     vol_ok = had_vol_drop or vol_not_expanding
 
-                    # --- 条件4：价格企稳（最近N根K线不再创新低）---
+                    # --- 条件4：价格企稳 = 不创新低 + 买点附近量能萎缩 ---
                     stab = config.filter3_stability_bars
                     if i >= stab + 1:
                         stab_lows = lows[i - stab:i]
                         prev_low = lows[i - stab - 1]
-                        price_stable = all(l >= prev_low * 0.995 for l in stab_lows)
+                        no_new_low = all(l >= prev_low * 0.995 for l in stab_lows)
                     else:
-                        price_stable = False
+                        no_new_low = False
+
+                    # 量能萎缩：买点前3根均量 < 前5~10根均量的70%
+                    # 说明卖压在减弱，不是放量下跌中途
+                    if i >= 10:
+                        buy_vol3 = sum(vols[i - 3:i]) / 3
+                        ref_vol7 = sum(vols[i - 10:i - 3]) / 7
+                        vol_shrink_ok = (ref_vol7 <= 0) or (buy_vol3 <= ref_vol7 * 0.7)
+                    else:
+                        vol_shrink_ok = True  # 数据不足时不强制
+
+                    price_stable = no_new_low and vol_shrink_ok
 
                     # --- 两次买入最小间隔（过滤RSI钝化连发）---
                     interval_ok = (last_buy_bar < 0) or (i - last_buy_bar >= config.filter3_min_interval)
@@ -1184,6 +1204,7 @@ class MonitorService:
             # FIX #1: 拉取更多K线（500根），减少RSI预热期噪声
             ohlcv = await self.market_data.fetch_ohlcv(token.network, token.address, limit=500)
             closes = [float(row[4]) for row in ohlcv if len(row) >= 5]
+            volumes = [float(row[5]) for row in ohlcv if len(row) >= 6]
             # 至少需要 20 根已确认K线（排除活K后还有足够数据）
             if len(closes) < 20:
                 return
@@ -1219,6 +1240,7 @@ class MonitorService:
             strategy, signal, reason = self.engine.evaluate(
                 token,
                 closes,
+                volumes,
                 ema9_now,
                 ema20_now,
                 rsi_prev,
