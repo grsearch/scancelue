@@ -108,6 +108,7 @@ class TokenRecord:
     no_open_reason: str = ""
     no_open_checked_at: datetime | None = None
     last_sell_at: datetime | None = None  # 卖出后冷静期：20分钟内禁止开单
+    add_source: str = "manual"  # 加入来源：manual/webhook/auto_scan
 
 
 @dataclass
@@ -235,6 +236,40 @@ class BirdeyeClient:
             "pool_created_at": created_at,
             "created_at": created_at,
         }
+
+    async def fetch_trending(self, network: str = "solana", limit: int = 20) -> list[dict[str, Any]]:
+        """拉取 trending 代币列表，返回基础信息供扫描筛选。"""
+        url = f"{self.base}/defi/token_trending"
+        params: dict[str, Any] = {"sort_by": "rank", "sort_type": "asc", "offset": 0, "limit": limit}
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, params=params, headers=self._headers(network))
+            resp.raise_for_status()
+            payload = resp.json()
+        items = (payload.get("data") or {}).get("tokens") or (payload.get("data") or [])
+        if isinstance(items, dict):
+            items = items.get("items") or items.get("list") or []
+        out: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            address = item.get("address") or item.get("mint") or ""
+            symbol = item.get("symbol") or item.get("name") or ""
+            fdv = self._to_float(item.get("fdv") or item.get("mc") or item.get("marketCap")) or 0.0
+            liquidity = self._to_float(item.get("liquidity") or item.get("liquidityUsd")) or 0.0
+            created_at = item.get("createdAt") or item.get("created_at") or item.get("pairCreatedAt")
+            if address:
+                out.append({
+                    "address": address,
+                    "symbol": symbol,
+                    "fdv": fdv,
+                    "liquidity": liquidity,
+                    "created_at": created_at,
+                })
+        return out
+
+    async def fetch_ohlcv_2h(self, network: str, token: str) -> list[list[float]]:
+        """拉取最近2小时1分钟K线，用于计算近期振幅。"""
+        return await self.fetch_ohlcv(network=network, token=token, timeframe="minute", limit=120)
 
     async def fetch_ohlcv_24h(self, network: str, token: str) -> list[list[float]]:
         """Fetch up to ~24h minute bars using paginated requests compatible with endpoint limits."""
@@ -1065,6 +1100,7 @@ class MonitorService:
             "no_open_reason": token.no_open_reason,
             "no_open_checked_at": self._dt_to_str(token.no_open_checked_at),
             "last_sell_at": self._dt_to_str(token.last_sell_at),
+            "add_source": token.add_source,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -1106,7 +1142,107 @@ class MonitorService:
             no_open_reason=str(payload.get("no_open_reason", "")),
             no_open_checked_at=parse_cg_datetime(payload.get("no_open_checked_at")),
             last_sell_at=parse_cg_datetime(payload.get("last_sell_at")),
+            add_source=str(payload.get("add_source", "manual")),
         )
+
+    async def auto_scan_trending(self) -> None:
+        """
+        定时扫描 Birdeye trending 列表，自动将符合条件的币加入白名单。
+        筛选条件：
+          - FDV >= 100000
+          - LP >= 10000
+          - AGE 1小时 ~ 7天
+          - 近2小时振幅 >= 30%
+          - 当前价 >= 近2小时最高价 * 60%（排除已崩塌的币）
+        """
+        # 环境变量控制是否启用自动扫描
+        if os.getenv("AUTO_SCAN_ENABLED", "1") != "1":
+            return
+        try:
+            trending = await self.market_data.fetch_trending(network="solana", limit=20)
+        except Exception as exc:
+            self.logs.append(SignalLog(
+                ts=datetime.now(timezone.utc), symbol="system", address="-",
+                strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                reason=f"auto_scan fetch_trending error: {exc}",
+            ))
+            self.logs = self.logs[-500:]
+            return
+
+        added = 0
+        for item in trending:
+            address = item.get("address", "")
+            symbol = item.get("symbol", "")
+            fdv = float(item.get("fdv") or 0)
+            liquidity = float(item.get("liquidity") or 0)
+            created_at_raw = item.get("created_at")
+
+            if not address:
+                continue
+
+            # 已在白名单或黑名单，跳过
+            async with self.lock:
+                already_in = address in self.tokens or address in self.blacklist
+            if already_in:
+                continue
+
+            # FDV >= 100000
+            if fdv < 100000:
+                continue
+
+            # LP >= 10000
+            if liquidity < 10000:
+                continue
+
+            # AGE：1小时 ~ 7天
+            pool_created = parse_cg_datetime(created_at_raw)
+            if pool_created is not None:
+                age_hours = (datetime.now(timezone.utc) - pool_created).total_seconds() / 3600
+                if age_hours < 1.0 or age_hours > 168.0:  # 168h = 7天
+                    continue
+
+            # 拉取近2小时K线，计算振幅
+            try:
+                ohlcv_2h = await self.market_data.fetch_ohlcv_2h("solana", address)
+                if len(ohlcv_2h) < 10:
+                    continue
+                recent_high = max(float(row[2]) for row in ohlcv_2h)
+                recent_low = min(float(row[3]) for row in ohlcv_2h)
+                current_price = float(ohlcv_2h[-1][4])
+                if recent_low <= 0:
+                    continue
+                amplitude_2h = (recent_high - recent_low) / recent_low
+                price_ratio = current_price / recent_high if recent_high > 0 else 0.0
+
+                # 近2小时振幅 >= 30%
+                if amplitude_2h < 0.30:
+                    continue
+
+                # 当前价 >= 近2小时最高价 * 60%（排除已崩塌）
+                if price_ratio < 0.60:
+                    continue
+
+            except Exception:
+                continue
+
+            # 符合条件，加入白名单
+            try:
+                await self.add_token(
+                    AddTokenRequest(network="solana", address=address, symbol=symbol),
+                    source="auto_scan",
+                )
+                added += 1
+                self.logs.append(SignalLog(
+                    ts=datetime.now(timezone.utc), symbol=symbol, address=address,
+                    strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                    reason=f"auto_scan加入白名单：振幅{amplitude_2h*100:.1f}% 当前价/高点{price_ratio*100:.1f}% FDV={fdv:,.0f}",
+                ))
+                self.logs = self.logs[-500:]
+            except Exception:
+                continue
+
+        if added > 0:
+            self.save_state()
 
     def save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1142,7 +1278,8 @@ class MonitorService:
         self.blacklist = set(str(x) for x in payload.get("blacklist", []))
         self.logs = logs[-500:]
 
-    async def add_token(self, req: AddTokenRequest) -> TokenRecord:
+    async def add_token(self, req: AddTokenRequest, source: str = "manual") -> TokenRecord:
+        """统一入口：手动/webhook/auto_scan 三种方式均走此方法，自动去重。"""
         if req.network.lower() != "solana":
             raise HTTPException(400, "仅支持 solana")
         async with self.lock:
@@ -1150,8 +1287,14 @@ class MonitorService:
                 raise HTTPException(400, "该代币在黑名单中")
             token = self.tokens.get(req.address)
             if token:
+                # 已存在：自动去重，不重复加入，只更新来源记录
                 return token
-            token = TokenRecord(network=req.network.lower(), address=req.address, symbol=req.symbol)
+            token = TokenRecord(
+                network=req.network.lower(),
+                address=req.address,
+                symbol=req.symbol,
+                add_source=source,
+            )
             self.tokens[req.address] = token
             self.save_state()
             await self.notify_realtime_event(req.address)
@@ -1400,18 +1543,28 @@ async def startup() -> None:
             address = await service.realtime_queue.get()
             await service.process_realtime_event(address)
 
+    async def auto_scan_loop() -> None:
+        # 启动延迟30秒，等服务完全就绪后再开始扫描
+        await asyncio.sleep(30)
+        while True:
+            await service.auto_scan_trending()
+            # 每5分钟扫描一次
+            await asyncio.sleep(int(os.getenv("AUTO_SCAN_INTERVAL_SECONDS", "300")))
+
     asyncio.create_task(periodic_reconcile_loop())
     asyncio.create_task(realtime_signal_loop())
     asyncio.create_task(ws_consumer.run_forever())
+    asyncio.create_task(auto_scan_loop())
 
 
 @app.post("/webhook/add-token")
 async def add_token(req: AddTokenRequest) -> dict[str, Any]:
-    token = await service.add_token(req)
+    token = await service.add_token(req, source="webhook")
     return {
         "ok": True,
         "token": {"network": token.network, "address": token.address, "symbol": token.symbol},
         "message": "已加入白名单并开始1分钟K线监控",
+        "source": token.add_source,
     }
 
 
@@ -1447,6 +1600,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "pnl": current_pnl_text,
                 "total_pnl": total_pnl_text,
                 "last_rsi": f"{t.last_rsi:.1f}" if t.last_rsi is not None else "N/A",
+                "source": t.add_source,
             }
         )
     logs = [
