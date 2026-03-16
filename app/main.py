@@ -714,6 +714,17 @@ BACKTEST_CONFIGS = [
         sell_cross_70=True,
         sell_cross_75=True,
         overbought_rsi=85.0,
+        # 与实盘策略保持一致：EMA间距过滤
+        use_filter3=True,
+        filter3_min_drop_ranging=0.0,
+        filter3_min_drop_trending=0.0,
+        filter3_lookback_high=60,
+        filter3_stability_bars=1,
+        filter3_vol_ratio=999.0,
+        filter3_min_interval=20,
+        filter3_rsi_strength=0.0,
+        filter3_ema_gap_max=0.15,
+        filter3_ema_gap_narrowing=True,
     ),
     BacktestConfig(
         name="反弹策略3",
