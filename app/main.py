@@ -416,7 +416,7 @@ def near(a: float, b: float, tolerance: float = 0.003) -> bool:
 
 
 def cross_up(prev: float, curr: float, level: float) -> bool:
-    return prev <= level < curr
+    return prev < level <= curr
 
 
 def cross_down(prev: float, curr: float, level: float) -> bool:
