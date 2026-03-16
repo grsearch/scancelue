@@ -91,6 +91,7 @@ class TokenRecord:
     pool_created_at: datetime | None = None
     fdv: float | None = None
     price: float | None = None
+    liquidity: float | None = None
     confirmed_state: MarketState = MarketState.RANGE
     candidate_state: MarketState | None = None
     candidate_count: int = 0
@@ -210,6 +211,7 @@ class BirdeyeClient:
         if isinstance(price_data, dict):
             price = self._to_float(price_data.get("value") or price_data.get("price")) or 0.0
 
+        liquidity: float | None = None
         overview_data = overview_payload.get("data") or {}
         if isinstance(overview_data, dict):
             fdv = self._to_float(
@@ -219,10 +221,16 @@ class BirdeyeClient:
                 or overview_data.get("marketCap")
             )
             created_at = overview_data.get("createdAt") or overview_data.get("created_at") or overview_data.get("pairCreatedAt")
+            liquidity = self._to_float(
+                overview_data.get("liquidity")
+                or overview_data.get("liquidityUsd")
+                or overview_data.get("lp")
+            )
 
         return {
             "fdv": float(fdv or 0),
             "price": float(price or 0),
+            "liquidity": float(liquidity or 0),
             "pool_created_at": created_at,
             "created_at": created_at,
         }
@@ -887,6 +895,7 @@ class MonitorService:
             "pool_created_at": self._dt_to_str(token.pool_created_at),
             "fdv": token.fdv,
             "price": token.price,
+            "liquidity": token.liquidity,
             "confirmed_state": token.confirmed_state.value,
             "candidate_state": token.candidate_state.value if token.candidate_state else None,
             "candidate_count": token.candidate_count,
@@ -926,6 +935,7 @@ class MonitorService:
             pool_created_at=parse_cg_datetime(payload.get("pool_created_at")),
             fdv=payload.get("fdv"),
             price=payload.get("price"),
+            liquidity=payload.get("liquidity"),
             confirmed_state=MarketState(payload.get("confirmed_state", MarketState.RANGE.value)),
             candidate_state=MarketState(payload["candidate_state"]) if payload.get("candidate_state") else None,
             candidate_count=int(payload.get("candidate_count", 0)),
@@ -1025,6 +1035,7 @@ class MonitorService:
             meta = await self.market_data.fetch_token_meta(token.network, token.address)
             token.fdv = meta["fdv"]
             token.price = meta["price"]
+            token.liquidity = meta.get("liquidity")
             pool_created = meta.get("pool_created_at")
             parsed_pool_created = parse_cg_datetime(pool_created)
             if parsed_pool_created:
@@ -1164,10 +1175,11 @@ class MonitorService:
 
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         too_low_fdv = token.fdv is not None and token.fdv < 20000
+        too_low_lp = token.liquidity is not None and token.liquidity < 10000
         base_age = token.pool_created_at or token.added_at
         age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
         too_old = age_hours > 6
-        if not (too_low_fdv or too_old):
+        if not (too_low_fdv or too_low_lp or too_old):
             return
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
@@ -1188,8 +1200,8 @@ class MonitorService:
                 symbol=token.symbol,
                 address=token.address,
                 strategy=StrategyName.SELL_ONLY,
-                signal=Signal.SELL if (too_low_fdv or too_old) else Signal.HOLD,
-                reason="白名单移除并加入黑名单",
+                signal=Signal.SELL if (too_low_fdv or too_low_lp or too_old) else Signal.HOLD,
+                reason=f"白名单移除并加入黑名单（FDV低={too_low_fdv} LP低={too_low_lp} 超龄={too_old}）",
             )
         )
         self.save_state()
@@ -1274,6 +1286,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "symbol": t.symbol,
                 "age": format_pool_age(t.pool_created_at, now, t.added_at),
                 "fdv": f"{(t.fdv or 0):,.0f}",
+                "lp": f"{(t.liquidity or 0):,.0f}",
                 "address": t.address,
                 "gmgn": f"https://gmgn.ai/sol/token/{t.address}",
                 "pnl": current_pnl_text,
