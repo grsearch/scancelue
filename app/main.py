@@ -323,7 +323,7 @@ class BirdeyeClient:
           2. 用 out_amount 卖回 SOL，得到 sol_back
           3. 总损耗 = (1 SOL - sol_back) / 1 SOL
           4. 减去两次 price_impact，剩余的就是 transfer tax
-        如果税率 > 1.2% 则认为是高税币。
+        注意：只检测合约层面的 transfer tax，不检测 LP fee（LP fee 由 Jupiter 选最优路径绕开）
         """
         SOL_MINT = "So11111111111111111111111111111111111111112"
         base_url = os.getenv("JUPITER_BASE_URL", "https://api.jup.ag")
@@ -335,17 +335,15 @@ class BirdeyeClient:
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 # 第一步：SOL -> Token 买入报价
-                buy_params = {
-                    "inputMint": SOL_MINT,
-                    "outputMint": token,
-                    "amount": str(amount_lamports),
-                    "slippageBps": "0",       # 滑点设0，只看理论值
-                    "onlyDirectRoutes": "false",
-                    "platformFeeBps": "0",
-                }
                 buy_resp = await client.get(
                     f"{base_url}/v6/quote",
-                    params=buy_params,
+                    params={
+                        "inputMint": SOL_MINT,
+                        "outputMint": token,
+                        "amount": str(amount_lamports),
+                        "slippageBps": "0",
+                        "platformFeeBps": "0",
+                    },
                     headers=headers,
                 )
                 if buy_resp.status_code != 200:
@@ -359,17 +357,15 @@ class BirdeyeClient:
                     return {"error": "buy quote returned 0 tokens"}
 
                 # 第二步：Token -> SOL 卖出报价
-                sell_params = {
-                    "inputMint": token,
-                    "outputMint": SOL_MINT,
-                    "amount": str(tokens_out),
-                    "slippageBps": "0",
-                    "onlyDirectRoutes": "false",
-                    "platformFeeBps": "0",
-                }
                 sell_resp = await client.get(
                     f"{base_url}/v6/quote",
-                    params=sell_params,
+                    params={
+                        "inputMint": token,
+                        "outputMint": SOL_MINT,
+                        "amount": str(tokens_out),
+                        "slippageBps": "0",
+                        "platformFeeBps": "0",
+                    },
                     headers=headers,
                 )
                 if sell_resp.status_code != 200:
@@ -379,7 +375,6 @@ class BirdeyeClient:
                 sol_back = int(sell_data.get("outAmount") or 0)
                 sell_price_impact = float(sell_data.get("priceImpactPct") or 0)
 
-            # 计算税率
             if amount_lamports <= 0:
                 return {"error": "invalid amount"}
 
@@ -389,7 +384,7 @@ class BirdeyeClient:
             estimated_tax = max(0.0, total_loss_pct - price_impact_total)
 
             return {
-                "buy_tax": round(estimated_tax / 2, 4),   # 近似：买卖各承担一半税
+                "buy_tax": round(estimated_tax / 2, 4),
                 "sell_tax": round(estimated_tax / 2, 4),
                 "total_tax": round(estimated_tax, 4),
                 "total_loss_pct": round(total_loss_pct, 4),
@@ -1705,7 +1700,7 @@ class MonitorService:
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         # 税率过高直接移除（买卖税率任一超过1.2%）
         # 税率为 None 说明 API 未返回，不触发退出
-        max_tax = 0.012  # 1.2%
+        max_tax = 0.02  # 2%
         buy_tax_val = token.buy_tax if token.buy_tax is not None else 0.0
         sell_tax_val = token.sell_tax if token.sell_tax is not None else 0.0
         # Birdeye 有时返回百分比值（如5.0代表5%），有时返回小数（如0.05代表5%）
