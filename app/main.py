@@ -852,15 +852,15 @@ class StrategyEngine:
                 ema_gap_prev = abs(ema9_1m_prev - ema20_1m_prev) / ema20_1m_prev
                 if ema_gap_now > 0.15:
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距过大({ema_gap_now*100:.1f}%)，趋势过强不开单"
-                if ema_gap_now >= ema_gap_prev:
+                if ema_gap_now >= ema_gap_prev + 0.005:  # 允许0.5%抖动
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距扩大中({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
 
             # 实盘过滤3：量能萎缩（买点前3根均量 < 前7根均量的70%）
             if volumes_1m is not None and len(volumes_1m) >= 11:
                 buy_vol3 = sum(volumes_1m[-4:-1]) / 3
                 ref_vol7 = sum(volumes_1m[-11:-4]) / 7
-                if ref_vol7 > 0 and buy_vol3 > ref_vol7 * 0.7:
-                    return StrategyName.REBOUND, Signal.HOLD, f"量能未萎缩(近3根={buy_vol3:.0f} > 参考均量*70%={ref_vol7*0.7:.0f})，卖压未减弱"
+                if ref_vol7 > 0 and buy_vol3 > ref_vol7 * 0.9:
+                    return StrategyName.REBOUND, Signal.HOLD, f"量能未萎缩(近3根={buy_vol3:.0f} > 参考均量*90%={ref_vol7*0.9:.0f})，卖压未减弱"
 
             # 实盘过滤4：跌幅门槛（区分震荡/趋势结构）
             if len(closes_1m) >= 61:
@@ -870,23 +870,17 @@ class StrategyEngine:
                 # 判断结构：近30根是否有效反弹过（RSI曾超过60）
                 # 用均线间距判断：间距<5%认为是震荡结构
                 ema_gap = abs(ema9_1m - ema20_1m) / ema20_1m if ema20_1m > 0 else 0.1
-                min_drop = 0.20 if ema_gap < 0.05 else 0.30
+                min_drop = 0.15 if ema_gap < 0.05 else 0.25
                 if drop_pct < min_drop:
                     return StrategyName.REBOUND, Signal.HOLD, f"跌幅不足({drop_pct*100:.1f}% < {min_drop*100:.0f}%)，反弹条件未满足"
 
-            # 实盘过滤5：价格企稳（最近3根K线不创新低 + 量能萎缩）
-            if len(closes_1m) >= 6 and volumes_1m is not None and len(volumes_1m) >= 6:
+            # 实盘过滤5：价格企稳（最近3根K线不创新低）
+            if len(closes_1m) >= 5:
                 stab_lows = [closes_1m[i] for i in range(-4, -1)]  # 排除活K取前3根
                 prev_low = closes_1m[-5]
                 no_new_low = all(l >= prev_low * 0.995 for l in stab_lows)
-                # 阳线量能要小于近期阴线均量
-                bear_vols = [volumes_1m[i] for i in range(-6, -1) if closes_1m[i] < closes_1m[i-1]]
-                bull_vols = [volumes_1m[i] for i in range(-4, -1) if closes_1m[i] >= closes_1m[i-1]]
-                bear_avg = sum(bear_vols) / len(bear_vols) if bear_vols else 0
-                bull_avg = sum(bull_vols) / len(bull_vols) if bull_vols else bear_avg
-                low_vol_bounce = bear_avg == 0 or bull_avg <= bear_avg * 0.8
-                if not (no_new_low and low_vol_bounce):
-                    return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳(不创新低={no_new_low} 低量反弹={low_vol_bounce})"
+                if not no_new_low:
+                    return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳：最近3根K线仍在创新低"
 
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+量萎缩+跌幅足+价格企稳"
 
@@ -1576,20 +1570,27 @@ class MonitorService:
                 jupiter_key = os.getenv("JUPITER_API_KEY", "").strip()
                 if jupiter_key:
                     try:
-                        jup = await self.market_data.fetch_jupiter_tax(token.address)
-                        if "error" not in jup:
-                            total_tax = jup.get("total_tax", 0.0)
-                            token.buy_tax = jup.get("buy_tax")
-                            token.sell_tax = jup.get("sell_tax")
+                        # 取3次均值，减少波动影响
+                        samples = []
+                        for _ in range(3):
+                            jup = await self.market_data.fetch_jupiter_tax(token.address)
+                            if "error" not in jup and jup.get("total_tax") is not None:
+                                samples.append(jup["total_tax"])
+                            await asyncio.sleep(0.5)  # 间隔0.5秒避免频率限制
+
+                        if samples:
+                            avg_total_tax = sum(samples) / len(samples)
+                            token.buy_tax = round(avg_total_tax / 2, 4)
+                            token.sell_tax = round(avg_total_tax / 2, 4)
                             self.logs.append(SignalLog(
                                 ts=datetime.now(timezone.utc),
                                 symbol=token.symbol, address=token.address,
                                 strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
-                                reason=f"Jupiter税率检测：买入税={token.buy_tax*100:.2f}% 卖出税={token.sell_tax*100:.2f}% 总损耗={jup.get('total_loss_pct',0)*100:.2f}%",
+                                reason=f"Jupiter税率检测({len(samples)}次均值)：买入税={token.buy_tax*100:.2f}% 卖出税={token.sell_tax*100:.2f}% 样本={[round(x*100,2) for x in samples]}",
                             ))
                             self.logs = self.logs[-500:]
                         else:
-                            # Jupiter 失败，降级用 RugCheck
+                            # Jupiter 全部失败，降级用 RugCheck
                             rc = await self.market_data.fetch_rugcheck_tax(token.address)
                             if rc.get("buy_tax") is not None:
                                 token.buy_tax = rc["buy_tax"]
@@ -1771,7 +1772,7 @@ class MonitorService:
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         # 税率过高直接移除（买卖税率任一超过1.2%）
         # 税率为 None 说明 API 未返回，不触发退出
-        max_tax = 0.02  # 2%
+        max_tax = 0.025  # 2.5%
         buy_tax_val = token.buy_tax if token.buy_tax is not None else 0.0
         sell_tax_val = token.sell_tax if token.sell_tax is not None else 0.0
         # Birdeye 有时返回百分比值（如5.0代表5%），有时返回小数（如0.05代表5%）
