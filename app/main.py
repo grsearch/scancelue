@@ -1862,7 +1862,7 @@ class MonitorService:
                 address=token.address,
                 strategy=StrategyName.SELL_ONLY,
                 signal=Signal.SELL if (token.rebound_entry_price or token.startup_entry_price) else Signal.HOLD,
-                reason=f"税率过高移除：买入税={buy_tax_val*100:.2f}% 卖出税={sell_tax_val*100:.2f}%，超过1.2%上限",
+                reason=f"税率过高移除：买入税={buy_tax_val*100:.2f}% 卖出税={sell_tax_val*100:.2f}%，超过3%上限",
             ))
             self.logs = self.logs[-500:]
             if token.rebound_entry_price is not None or token.startup_entry_price is not None:
@@ -1876,13 +1876,9 @@ class MonitorService:
         # 只有明确有值且低于阈值才计入
         fdv_valid = token.fdv is not None and token.fdv > 0
         lp_valid = token.liquidity is not None and token.liquidity > 0
-        too_low_fdv = fdv_valid and token.fdv < 20000
+        too_low_fdv = fdv_valid and token.fdv < 50000
         too_low_lp = lp_valid and token.liquidity < 10000
-        base_age = token.pool_created_at or token.added_at
-        age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
-        too_old = age_hours > 12
-
-        if not (too_low_fdv or too_low_lp or too_old):
+        if not (too_low_fdv or too_low_lp):
             # 条件正常，重置计数
             token.exit_check_fail_count = 0
             return
@@ -1905,8 +1901,8 @@ class MonitorService:
                 symbol=token.symbol,
                 address=token.address,
                 strategy=StrategyName.SELL_ONLY,
-                signal=Signal.SELL if (too_low_fdv or too_low_lp or too_old) else Signal.HOLD,
-                reason=f"白名单移除并加入黑名单（FDV低={too_low_fdv} LP低={too_low_lp} 超龄={too_old}）",
+                signal=Signal.SELL if (too_low_fdv or too_low_lp) else Signal.HOLD,
+                reason=f"白名单移除并加入黑名单（FDV低={too_low_fdv} LP低={too_low_lp}）",
             )
         )
         self.save_state()
