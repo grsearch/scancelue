@@ -883,23 +883,14 @@ class StrategyEngine:
                 ema_gap_prev = abs(ema9_1m_prev - ema20_1m_prev) / ema20_1m_prev
                 if ema_gap_now > 0.15:
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距过大({ema_gap_now*100:.1f}%)，趋势过强不开单"
-                if ema_gap_now >= ema_gap_prev + 0.005:  # 允许0.5%抖动
+                if ema_gap_now >= ema_gap_prev + 0.01:  # 允许1%抖动
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距扩大中({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
 
-            # 实盘过滤3：量能萎缩（买点前3根均量 < 前7根均量的70%）
-            if volumes_1m is not None and len(volumes_1m) >= 11:
-                buy_vol3 = sum(volumes_1m[-4:-1]) / 3
-                ref_vol7 = sum(volumes_1m[-11:-4]) / 7
-                if ref_vol7 > 0 and buy_vol3 > ref_vol7 * 0.9:
-                    return StrategyName.REBOUND, Signal.HOLD, f"量能未萎缩(近3根={buy_vol3:.0f} > 参考均量*90%={ref_vol7*0.9:.0f})，卖压未减弱"
-
-            # 实盘过滤4：跌幅门槛（区分震荡/趋势结构）
-            if len(closes_1m) >= 61:
-                lookback_closes = closes_1m[-61:-1]  # 排除活K，取前60根
+            # 实盘过滤3：跌幅门槛（区分震荡/趋势结构，回看30根）
+            if len(closes_1m) >= 31:
+                lookback_closes = closes_1m[-31:-1]  # 排除活K，取前30根
                 recent_high = max(lookback_closes)
                 drop_pct = (recent_high - close_1m) / recent_high if recent_high > 0 else 0.0
-                # 判断结构：近30根是否有效反弹过（RSI曾超过60）
-                # 用均线间距判断：间距<5%认为是震荡结构
                 ema_gap = abs(ema9_1m - ema20_1m) / ema20_1m if ema20_1m > 0 else 0.1
                 min_drop = 0.15 if ema_gap < 0.05 else 0.25
                 if drop_pct < min_drop:
