@@ -109,6 +109,7 @@ class TokenRecord:
     no_open_checked_at: datetime | None = None
     last_sell_at: datetime | None = None  # 卖出后冷静期：20分钟内禁止开单
     add_source: str = "manual"  # 加入来源：manual/webhook/auto_scan
+    exit_check_fail_count: int = 0  # 连续低于退出阈值的次数，需连续2次才真正移除
 
 
 @dataclass
@@ -1101,6 +1102,7 @@ class MonitorService:
             "no_open_checked_at": self._dt_to_str(token.no_open_checked_at),
             "last_sell_at": self._dt_to_str(token.last_sell_at),
             "add_source": token.add_source,
+            "exit_check_fail_count": token.exit_check_fail_count,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -1143,6 +1145,7 @@ class MonitorService:
             no_open_checked_at=parse_cg_datetime(payload.get("no_open_checked_at")),
             last_sell_at=parse_cg_datetime(payload.get("last_sell_at")),
             add_source=str(payload.get("add_source", "manual")),
+            exit_check_fail_count=int(payload.get("exit_check_fail_count", 0)),
         )
 
     async def auto_scan_trending(self) -> None:
@@ -1472,13 +1475,39 @@ class MonitorService:
             await self._process_token(token)
 
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
-        too_low_fdv = token.fdv is not None and token.fdv < 20000
-        too_low_lp = token.liquidity is not None and token.liquidity < 10000
+        # FDV=0 或 liquidity=0 说明 API 返回异常数据，不触发退出
+        # 只有明确有值且低于阈值才计入
+        fdv_valid = token.fdv is not None and token.fdv > 0
+        lp_valid = token.liquidity is not None and token.liquidity > 0
+        too_low_fdv = fdv_valid and token.fdv < 20000
+        too_low_lp = lp_valid and token.liquidity < 10000
         base_age = token.pool_created_at or token.added_at
         age_hours = max(0.0, (datetime.now(timezone.utc) - base_age).total_seconds() / 3600)
         too_old = age_hours > 12
+
         if not (too_low_fdv or too_low_lp or too_old):
+            # 条件正常，重置连续失败计数
+            token.exit_check_fail_count = 0
             return
+
+        # AGE 超龄直接移除，不需要连续2次
+        if too_old:
+            pass  # 直接进入移除逻辑
+        else:
+            # FDV/LP 低于阈值：需要连续2次确认，避免 API 抖动误移除
+            token.exit_check_fail_count += 1
+            if token.exit_check_fail_count < 2:
+                self.logs.append(SignalLog(
+                    ts=datetime.now(timezone.utc),
+                    symbol=token.symbol,
+                    address=token.address,
+                    strategy=StrategyName.SELL_ONLY,
+                    signal=Signal.HOLD,
+                    reason=f"白名单退出预警（第{token.exit_check_fail_count}次）：FDV低={too_low_fdv}({token.fdv}) LP低={too_low_lp}({token.liquidity})，等待下次确认",
+                ))
+                self.logs = self.logs[-500:]
+                self.save_state()
+                return
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
             if token.price and token.price > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
