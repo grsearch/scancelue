@@ -15,6 +15,18 @@
       .SELL { color: #f87171; }
       .HOLD { color: #facc15; }
       .muted { color: #94a3b8; font-size: 12px; }
+      /* 来源标签 */
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: bold;
+        white-space: nowrap;
+      }
+      .badge-webhook  { background: #1d4ed8; color: #bfdbfe; }
+      .badge-auto     { background: #065f46; color: #6ee7b7; }
+      .badge-manual   { background: #44403c; color: #d6d3d1; }
     </style>
   </head>
   <body>
@@ -25,20 +37,45 @@
       <h2>白名单监控代币</h2>
       <table>
         <thead>
-          <tr><th>Symbol</th><th>AGE</th><th>FDV</th><th>当前盈亏(1+1 SOL)</th><th>历史总盈亏</th><th>合约地址</th></tr>
+          <tr>
+            <th>Symbol</th>
+            <th>来源</th>
+            <th>AGE</th>
+            <th>FDV</th>
+            <th>LP</th>
+            <th>LP锁定</th>
+            <th>税率</th>
+            <th>RSI</th>
+            <th>当前盈亏</th>
+            <th>历史总盈亏</th>
+            <th>合约地址</th>
+          </tr>
         </thead>
         <tbody>
           {% for t in tokens %}
           <tr>
             <td>{{ t.symbol }}</td>
+            <td>
+              {% if t.source == 'webhook' %}
+                <span class="badge badge-webhook">🔗 龙虾扫链</span>
+              {% elif t.source == 'auto_scan' %}
+                <span class="badge badge-auto">🤖 自动扫描</span>
+              {% else %}
+                <span class="badge badge-manual">✋ 手动添加</span>
+              {% endif %}
+            </td>
             <td>{{ t.age }}</td>
             <td>{{ t.fdv }}</td>
+            <td>{{ t.lp }}</td>
+            <td>{{ t.lp_locked }}</td>
+            <td>{{ t.tax }}</td>
+            <td>{{ t.last_rsi }}</td>
             <td>{{ t.pnl }}</td>
             <td>{{ t.total_pnl }}</td>
-            <td><a href="{{ t.gmgn }}" target="_blank">{{ t.address }}</a></td>
+            <td><a href="{{ t.gmgn }}" target="_blank">{{ t.address[:8] }}...{{ t.address[-4:] }}</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="6">暂无监控代币</td></tr>
+          <tr><td colspan="11">暂无监控代币</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -60,7 +97,7 @@
             <td>{{ l.reason }}</td>
           </tr>
           {% else %}
-          <tr><td colspan="6">暂无信号记录</td></tr>
+          <tr><td colspan="5">暂无信号记录</td></tr>
           {% endfor %}
         </tbody>
       </table>
