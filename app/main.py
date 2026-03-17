@@ -112,6 +112,7 @@ class TokenRecord:
     exit_check_fail_count: int = 0  # 连续低于退出阈值的次数，需连续2次才真正移除
     buy_tax: float | None = None   # 买入税率
     sell_tax: float | None = None  # 卖出税率
+    rebound_peak_price: float | None = None  # 持仓后最高价，用于移动止盈
 
 
 @dataclass
@@ -815,15 +816,26 @@ class StrategyEngine:
 
         if has_rebound:
             entry = token.rebound_entry_price
-            # FIX #4: 止损也用已确认收盘价，避免活K抖动
-            if (
-                rsi1_now >= 85
-                or cross_down(rsi1_prev, rsi1_now, 75)
-                or cross_down(rsi1_prev, rsi1_now, 70)
-                or cross_down(rsi1_prev, rsi1_now, 65)
-                or (entry is not None and close_1m <= entry * 0.90)
-            ):
-                return StrategyName.REBOUND, Signal.SELL, "反弹策略卖出：RSI下穿65/70/75、RSI>=85或跌破首仓90%"
+
+            # 更新持仓最高价（用于移动止盈）
+            if token.rebound_peak_price is None or close_1m > token.rebound_peak_price:
+                token.rebound_peak_price = close_1m
+
+            peak = token.rebound_peak_price or close_1m
+
+            # 卖出条件1：RSI超买（>=85）
+            if rsi1_now >= 85:
+                return StrategyName.REBOUND, Signal.SELL, f"反弹策略卖出：RSI超买({rsi1_now:.1f}>=85)"
+
+            # 卖出条件2：移动止盈 - 从最高点回撤8%
+            trailing_stop = peak * 0.92
+            if close_1m <= trailing_stop:
+                gain_pct = (peak / entry - 1.0) * 100 if entry and entry > 0 else 0.0
+                return StrategyName.REBOUND, Signal.SELL, f"移动止盈：最高{peak:.4f}回撤8%至{trailing_stop:.4f}，峰值收益{gain_pct:.1f}%"
+
+            # 卖出条件3：跌破首仓止损线（-10%）
+            if entry is not None and close_1m <= entry * 0.90:
+                return StrategyName.REBOUND, Signal.SELL, f"止损：跌破首仓价{entry:.4f}的90%"
 
         if not has_rebound and cross_up(rsi1_prev, rsi1_now, 30):
             now_utc = datetime.now(timezone.utc)
@@ -844,14 +856,39 @@ class StrategyEngine:
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距扩大中({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
 
             # 实盘过滤3：量能萎缩（买点前3根均量 < 前7根均量的70%）
-            # 防止在放量下跌途中买入
             if volumes_1m is not None and len(volumes_1m) >= 11:
-                buy_vol3 = sum(volumes_1m[-4:-1]) / 3      # 买点附近3根均量（排除活K）
-                ref_vol7 = sum(volumes_1m[-11:-4]) / 7     # 更早的7根参考均量
+                buy_vol3 = sum(volumes_1m[-4:-1]) / 3
+                ref_vol7 = sum(volumes_1m[-11:-4]) / 7
                 if ref_vol7 > 0 and buy_vol3 > ref_vol7 * 0.7:
                     return StrategyName.REBOUND, Signal.HOLD, f"量能未萎缩(近3根={buy_vol3:.0f} > 参考均量*70%={ref_vol7*0.7:.0f})，卖压未减弱"
 
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+量能萎缩"
+            # 实盘过滤4：跌幅门槛（区分震荡/趋势结构）
+            if len(closes_1m) >= 61:
+                lookback_closes = closes_1m[-61:-1]  # 排除活K，取前60根
+                recent_high = max(lookback_closes)
+                drop_pct = (recent_high - close_1m) / recent_high if recent_high > 0 else 0.0
+                # 判断结构：近30根是否有效反弹过（RSI曾超过60）
+                # 用均线间距判断：间距<5%认为是震荡结构
+                ema_gap = abs(ema9_1m - ema20_1m) / ema20_1m if ema20_1m > 0 else 0.1
+                min_drop = 0.20 if ema_gap < 0.05 else 0.30
+                if drop_pct < min_drop:
+                    return StrategyName.REBOUND, Signal.HOLD, f"跌幅不足({drop_pct*100:.1f}% < {min_drop*100:.0f}%)，反弹条件未满足"
+
+            # 实盘过滤5：价格企稳（最近3根K线不创新低 + 量能萎缩）
+            if len(closes_1m) >= 6 and volumes_1m is not None and len(volumes_1m) >= 6:
+                stab_lows = [closes_1m[i] for i in range(-4, -1)]  # 排除活K取前3根
+                prev_low = closes_1m[-5]
+                no_new_low = all(l >= prev_low * 0.995 for l in stab_lows)
+                # 阳线量能要小于近期阴线均量
+                bear_vols = [volumes_1m[i] for i in range(-6, -1) if closes_1m[i] < closes_1m[i-1]]
+                bull_vols = [volumes_1m[i] for i in range(-4, -1) if closes_1m[i] >= closes_1m[i-1]]
+                bear_avg = sum(bear_vols) / len(bear_vols) if bear_vols else 0
+                bull_avg = sum(bull_vols) / len(bull_vols) if bull_vols else bear_avg
+                low_vol_bounce = bear_avg == 0 or bull_avg <= bear_avg * 0.8
+                if not (no_new_low and low_vol_bounce):
+                    return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳(不创新低={no_new_low} 低量反弹={low_vol_bounce})"
+
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+量萎缩+跌幅足+价格企稳"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -881,6 +918,7 @@ class BacktestConfig:
     filter3_rsi_strength: float = 60.0 # 近期RSI最高值门槛
     filter3_ema_gap_max: float = 0.15    # EMA间距上限（超过则不买）
     filter3_ema_gap_narrowing: bool = True  # 是否要求间距收窄
+    trailing_stop_pct: float | None = None  # 移动止盈回撤比例（None=不启用）
 
 
 @dataclass
@@ -952,6 +990,7 @@ BACKTEST_CONFIGS = [
         filter3_rsi_strength=60.0,
         filter3_ema_gap_max=0.15,
         filter3_ema_gap_narrowing=True,
+        trailing_stop_pct=0.08,  # 移动止盈：从最高点回撤8%卖出
     ),
 ]
 
@@ -1002,6 +1041,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
     realized = 0.0
     trades = 0
     last_buy_bar: int = -999  # 反弹策略3：记录上次买入K线索引
+    peak_price: float | None = None  # 移动止盈：持仓最高价
 
     for i in range(2, len(tf_rows)):
         ts = tf_rows[i][0]
@@ -1022,13 +1062,38 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
 
         if config.mode == "rebound":
             if has_pos:
-                sell = (
-                    rsi_now >= config.overbought_rsi
-                    or (config.sell_cross_75 and cross_down(rsi_prev, rsi_now, 75))
-                    or (config.sell_cross_70 and cross_down(rsi_prev, rsi_now, 70))
-                    or (config.sell_cross_65 and cross_down(rsi_prev, rsi_now, 65))
-                    or (config.stop_loss_pct is not None and first_entry is not None and first_entry > 0 and close_now <= first_entry * config.stop_loss_pct)
+                # 更新持仓最高价（移动止盈用）
+                if peak_price is None or close_now > peak_price:
+                    peak_price = close_now
+
+                # 移动止盈：从最高点回撤 trailing_stop_pct
+                trailing_sell = (
+                    config.trailing_stop_pct is not None
+                    and peak_price is not None
+                    and close_now <= peak_price * (1 - config.trailing_stop_pct)
                 )
+
+                # RSI卖出条件（移动止盈开启时只保留超买，关闭时保留RSI下穿）
+                if config.trailing_stop_pct is not None:
+                    # 启用移动止盈：只保留超买卖出和止损
+                    rsi_sell = rsi_now >= config.overbought_rsi
+                else:
+                    # 未启用移动止盈：保留原RSI下穿逻辑
+                    rsi_sell = (
+                        rsi_now >= config.overbought_rsi
+                        or (config.sell_cross_75 and cross_down(rsi_prev, rsi_now, 75))
+                        or (config.sell_cross_70 and cross_down(rsi_prev, rsi_now, 70))
+                        or (config.sell_cross_65 and cross_down(rsi_prev, rsi_now, 65))
+                    )
+
+                stop_loss_sell = (
+                    config.stop_loss_pct is not None
+                    and first_entry is not None
+                    and first_entry > 0
+                    and close_now <= first_entry * config.stop_loss_pct
+                )
+
+                sell = trailing_sell or rsi_sell or stop_loss_sell
 
                 if sell and first_entry is not None and first_entry > 0:
                     legs = [first_entry]
@@ -1039,6 +1104,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     first_entry = None
                     add_entry = None
                     added_once = False
+                    peak_price = None
                     continue
 
                 if config.enable_add and (not added_once) and first_entry is not None and cross_up(rsi_prev, rsi_now, config.buy_rsi_threshold) and close_now <= first_entry * config.add_drop_pct:
@@ -1129,6 +1195,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     add_entry = None
                     added_once = False
                     last_buy_bar = i
+                    peak_price = close_now  # 初始化移动止盈最高价
                     trades += 1
 
         elif config.mode == "trend":
@@ -1264,6 +1331,7 @@ class MonitorService:
             "exit_check_fail_count": token.exit_check_fail_count,
             "buy_tax": token.buy_tax,
             "sell_tax": token.sell_tax,
+            "rebound_peak_price": token.rebound_peak_price,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -1309,6 +1377,7 @@ class MonitorService:
             exit_check_fail_count=int(payload.get("exit_check_fail_count", 0)),
             buy_tax=payload.get("buy_tax"),
             sell_tax=payload.get("sell_tax"),
+            rebound_peak_price=payload.get("rebound_peak_price"),
         )
 
     async def auto_scan_trending(self) -> None:
@@ -1641,6 +1710,7 @@ class MonitorService:
                 else:
                     if token.rebound_entry_price is None:
                         token.rebound_entry_price = close
+                        token.rebound_peak_price = close  # 初始化移动止盈最高价
                     token.position.has_position = token.rebound_entry_price is not None
             elif signal == Signal.ADD:
                 token.position.has_position = True
@@ -1657,6 +1727,7 @@ class MonitorService:
                     token.realized_pnl_sol += sum((close / entry) - 1.0 for entry in legs)
                 token.rebound_entry_price = None
                 token.rebound_add_entry_price = None
+                token.rebound_peak_price = None  # 重置移动止盈最高价
                 token.startup_entry_price = None
                 token.startup_last_cross_bucket = 0
                 token.startup_last_entry_cross_bucket = 0
