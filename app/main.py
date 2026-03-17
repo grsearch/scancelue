@@ -315,6 +315,93 @@ class BirdeyeClient:
             "risks": [r.get("name") for r in (payload.get("risks") or []) if isinstance(r, dict)],
         }
 
+    async def fetch_jupiter_tax(self, token: str, amount_lamports: int = 1_000_000_000) -> dict[str, Any]:
+        """
+        用 Jupiter Quote API 模拟一买一卖，检测合约 transfer tax。
+        原理：
+          1. 用 1 SOL 买入 token，得到 out_amount
+          2. 用 out_amount 卖回 SOL，得到 sol_back
+          3. 总损耗 = (1 SOL - sol_back) / 1 SOL
+          4. 减去两次 price_impact，剩余的就是 transfer tax
+        如果税率 > 1.2% 则认为是高税币。
+        """
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        base_url = os.getenv("JUPITER_BASE_URL", "https://api.jup.ag")
+        api_key = os.getenv("JUPITER_API_KEY", "").strip()
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["x-api-key"] = api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                # 第一步：SOL -> Token 买入报价
+                buy_params = {
+                    "inputMint": SOL_MINT,
+                    "outputMint": token,
+                    "amount": str(amount_lamports),
+                    "slippageBps": "0",       # 滑点设0，只看理论值
+                    "onlyDirectRoutes": "false",
+                    "platformFeeBps": "0",
+                }
+                buy_resp = await client.get(
+                    f"{base_url}/v6/quote",
+                    params=buy_params,
+                    headers=headers,
+                )
+                if buy_resp.status_code != 200:
+                    return {"error": f"buy quote failed: {buy_resp.status_code}"}
+                buy_data = buy_resp.json()
+
+                tokens_out = int(buy_data.get("outAmount") or 0)
+                buy_price_impact = float(buy_data.get("priceImpactPct") or 0)
+
+                if tokens_out <= 0:
+                    return {"error": "buy quote returned 0 tokens"}
+
+                # 第二步：Token -> SOL 卖出报价
+                sell_params = {
+                    "inputMint": token,
+                    "outputMint": SOL_MINT,
+                    "amount": str(tokens_out),
+                    "slippageBps": "0",
+                    "onlyDirectRoutes": "false",
+                    "platformFeeBps": "0",
+                }
+                sell_resp = await client.get(
+                    f"{base_url}/v6/quote",
+                    params=sell_params,
+                    headers=headers,
+                )
+                if sell_resp.status_code != 200:
+                    return {"error": f"sell quote failed: {sell_resp.status_code}"}
+                sell_data = sell_resp.json()
+
+                sol_back = int(sell_data.get("outAmount") or 0)
+                sell_price_impact = float(sell_data.get("priceImpactPct") or 0)
+
+            # 计算税率
+            if amount_lamports <= 0:
+                return {"error": "invalid amount"}
+
+            total_loss_pct = (amount_lamports - sol_back) / amount_lamports
+            price_impact_total = (buy_price_impact + sell_price_impact) / 100
+            # transfer tax = 总损耗 - 正常价格影响
+            estimated_tax = max(0.0, total_loss_pct - price_impact_total)
+
+            return {
+                "buy_tax": round(estimated_tax / 2, 4),   # 近似：买卖各承担一半税
+                "sell_tax": round(estimated_tax / 2, 4),
+                "total_tax": round(estimated_tax, 4),
+                "total_loss_pct": round(total_loss_pct, 4),
+                "price_impact_total": round(price_impact_total, 4),
+                "sol_in": amount_lamports,
+                "sol_back": sol_back,
+                "tokens_out": tokens_out,
+            }
+
+        except Exception as exc:
+            return {"error": str(exc)}
+
     async def fetch_trending(self, network: str = "solana", limit: int = 20) -> list[dict[str, Any]]:
         """拉取 trending 代币列表，返回基础信息供扫描筛选。"""
         url = f"{self.base}/defi/token_trending"
@@ -1418,21 +1505,54 @@ class MonitorService:
             token.buy_tax = meta.get("buy_tax")
             token.sell_tax = meta.get("sell_tax")
 
-            # 如果 Birdeye 没有返回税率，用 RugCheck 补充（仅在首次加入或税率未知时查询）
+            # 税率检测优先级：Jupiter模拟 > Birdeye > RugCheck
+            # 仅在首次（税率未知）时查询，避免每次都调用
             if token.buy_tax is None and token.sell_tax is None:
+                # 优先用 Jupiter 模拟（最准确，直接检测合约 transfer tax）
+                jupiter_key = os.getenv("JUPITER_API_KEY", "").strip()
+                if jupiter_key:
+                    try:
+                        jup = await self.market_data.fetch_jupiter_tax(token.address)
+                        if "error" not in jup:
+                            total_tax = jup.get("total_tax", 0.0)
+                            token.buy_tax = jup.get("buy_tax")
+                            token.sell_tax = jup.get("sell_tax")
+                            self.logs.append(SignalLog(
+                                ts=datetime.now(timezone.utc),
+                                symbol=token.symbol, address=token.address,
+                                strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                                reason=f"Jupiter税率检测：买入税={token.buy_tax*100:.2f}% 卖出税={token.sell_tax*100:.2f}% 总损耗={jup.get('total_loss_pct',0)*100:.2f}%",
+                            ))
+                            self.logs = self.logs[-500:]
+                        else:
+                            # Jupiter 失败，降级用 RugCheck
+                            rc = await self.market_data.fetch_rugcheck_tax(token.address)
+                            if rc.get("buy_tax") is not None:
+                                token.buy_tax = rc["buy_tax"]
+                            if rc.get("sell_tax") is not None:
+                                token.sell_tax = rc["sell_tax"]
+                    except Exception:
+                        pass
+                else:
+                    # 没有 Jupiter Key，用 RugCheck
+                    try:
+                        rc = await self.market_data.fetch_rugcheck_tax(token.address)
+                        if rc.get("buy_tax") is not None:
+                            token.buy_tax = rc["buy_tax"]
+                        if rc.get("sell_tax") is not None:
+                            token.sell_tax = rc["sell_tax"]
+                    except Exception:
+                        pass
+
+                # RugCheck rugged 检测（无论用哪种税率来源都检查）
                 try:
-                    rc = await self.market_data.fetch_rugcheck_tax(token.address)
-                    if rc.get("buy_tax") is not None:
-                        token.buy_tax = rc["buy_tax"]
-                    if rc.get("sell_tax") is not None:
-                        token.sell_tax = rc["sell_tax"]
-                    # 如果 RugCheck 标记为已 rug，直接移除
-                    if rc.get("rugged"):
+                    rc_check = await self.market_data.fetch_rugcheck_tax(token.address)
+                    if rc_check.get("rugged"):
                         self.logs.append(SignalLog(
                             ts=datetime.now(timezone.utc),
                             symbol=token.symbol, address=token.address,
                             strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
-                            reason=f"RugCheck标记为已Rug，移除白名单",
+                            reason="RugCheck标记为已Rug，移除白名单",
                         ))
                         self.logs = self.logs[-500:]
                         async with self.lock:
