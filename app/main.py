@@ -907,7 +907,7 @@ class StrategyEngine:
                 if not no_new_low:
                     return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳：最近3根K线仍在创新低"
 
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+量萎缩+跌幅足+价格企稳"
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+跌幅足+价格企稳"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
