@@ -113,6 +113,8 @@ class TokenRecord:
     buy_tax: float | None = None   # 买入税率
     sell_tax: float | None = None  # 卖出税率
     rebound_peak_price: float | None = None  # 持仓后最高价，用于移动止盈
+    rugcheck_checked: bool = False  # 是否已做过 RugCheck 检测（只检测一次）
+    lp_locked_pct: float | None = None  # LP 锁定比例
 
 
 @dataclass
@@ -308,9 +310,38 @@ class BirdeyeClient:
                     buy_tax = basis_points / 10000  # basis points 转小数
                     sell_tax = basis_points / 10000
 
+        # LP Locked 检测
+        lp_locked_pct: float | None = None
+        # 方式1：markets 里的 lp_locked_pct
+        markets = payload.get("markets") or []
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            lp = self._to_float(
+                market.get("lp_locked_pct")
+                or market.get("lpLockedPct")
+                or market.get("lp_lock_pct")
+            )
+            if lp is not None:
+                # 取最大值（最主要的池子）
+                lp_locked_pct = max(lp_locked_pct or 0.0, lp)
+
+        # 方式2：顶层 lp_locked_pct 字段
+        if lp_locked_pct is None:
+            lp_locked_pct = self._to_float(
+                payload.get("lp_locked_pct")
+                or payload.get("lpLockedPct")
+                or payload.get("lp_lock")
+            )
+
+        # 统一转换为小数（RugCheck 有时返回百分比如 99.97，有时返回小数如 0.9997）
+        if lp_locked_pct is not None and lp_locked_pct > 1:
+            lp_locked_pct = lp_locked_pct / 100
+
         return {
             "buy_tax": buy_tax,
             "sell_tax": sell_tax,
+            "lp_locked_pct": lp_locked_pct,
             "score": payload.get("score"),
             "rugged": payload.get("rugged", False),
             "risks": [r.get("name") for r in (payload.get("risks") or []) if isinstance(r, dict)],
@@ -1326,6 +1357,8 @@ class MonitorService:
             "buy_tax": token.buy_tax,
             "sell_tax": token.sell_tax,
             "rebound_peak_price": token.rebound_peak_price,
+            "rugcheck_checked": token.rugcheck_checked,
+            "lp_locked_pct": token.lp_locked_pct,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -1372,6 +1405,8 @@ class MonitorService:
             buy_tax=payload.get("buy_tax"),
             sell_tax=payload.get("sell_tax"),
             rebound_peak_price=payload.get("rebound_peak_price"),
+            rugcheck_checked=bool(payload.get("rugcheck_checked", False)),
+            lp_locked_pct=payload.get("lp_locked_pct"),
         )
 
     async def auto_scan_trending(self) -> None:
@@ -1599,7 +1634,7 @@ class MonitorService:
                     except Exception:
                         pass
                 else:
-                    # 没有 Jupiter Key，用 RugCheck
+                    # 没有 Jupiter Key，用 RugCheck 补充税率
                     try:
                         rc = await self.market_data.fetch_rugcheck_tax(token.address)
                         if rc.get("buy_tax") is not None:
@@ -1609,24 +1644,58 @@ class MonitorService:
                     except Exception:
                         pass
 
-                # RugCheck rugged 检测（无论用哪种税率来源都检查）
-                try:
-                    rc_check = await self.market_data.fetch_rugcheck_tax(token.address)
-                    if rc_check.get("rugged"):
+                # RugCheck 首次检测：rugged + LP Locked（只调用一次，避免频率限制）
+                if not token.rugcheck_checked:
+                    try:
+                        rc_check = await self.market_data.fetch_rugcheck_tax(token.address)
+                        token.rugcheck_checked = True
+
+                        # 检测已 Rug
+                        if rc_check.get("rugged"):
+                            self.logs.append(SignalLog(
+                                ts=datetime.now(timezone.utc),
+                                symbol=token.symbol, address=token.address,
+                                strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                                reason="RugCheck标记为已Rug，移除白名单",
+                            ))
+                            self.logs = self.logs[-500:]
+                            async with self.lock:
+                                self.tokens.pop(token.address, None)
+                                self.blacklist.add(token.address)
+                            self.save_state()
+                            return
+
+                        # 检测 LP Locked
+                        lp_locked = rc_check.get("lp_locked_pct")
+                        if lp_locked is not None:
+                            token.lp_locked_pct = lp_locked
+                            if lp_locked < 0.90:
+                                self.logs.append(SignalLog(
+                                    ts=datetime.now(timezone.utc),
+                                    symbol=token.symbol, address=token.address,
+                                    strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                                    reason=f"LP锁定不足({lp_locked*100:.2f}% < 90%)，移除白名单",
+                                ))
+                                self.logs = self.logs[-500:]
+                                if token.rebound_entry_price is not None or token.startup_entry_price is not None:
+                                    await self.dispatcher.send(token, Signal.SELL, "LP锁定不足，强制平仓")
+                                async with self.lock:
+                                    self.tokens.pop(token.address, None)
+                                    self.blacklist.add(token.address)
+                                self.save_state()
+                                return
+
                         self.logs.append(SignalLog(
                             ts=datetime.now(timezone.utc),
                             symbol=token.symbol, address=token.address,
                             strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
-                            reason="RugCheck标记为已Rug，移除白名单",
+                            reason=f"RugCheck首次检测完成：LP锁定={lp_locked*100:.2f}% rugged=False" if lp_locked is not None else "RugCheck首次检测完成：LP锁定数据不可用",
                         ))
                         self.logs = self.logs[-500:]
-                        async with self.lock:
-                            self.tokens.pop(token.address, None)
-                            self.blacklist.add(token.address)
                         self.save_state()
-                        return
-                except Exception:
-                    pass
+                    except Exception as exc:
+                        # 失败不标记 checked，下次继续尝试
+                        token.rugcheck_checked = False
             pool_created = meta.get("pool_created_at")
             parsed_pool_created = parse_cg_datetime(pool_created)
             if parsed_pool_created:
@@ -1772,7 +1841,7 @@ class MonitorService:
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
         # 税率过高直接移除（买卖税率任一超过1.2%）
         # 税率为 None 说明 API 未返回，不触发退出
-        max_tax = 0.025  # 2.5%
+        max_tax = 0.03  # 3%
         buy_tax_val = token.buy_tax if token.buy_tax is not None else 0.0
         sell_tax_val = token.sell_tax if token.sell_tax is not None else 0.0
         # Birdeye 有时返回百分比值（如5.0代表5%），有时返回小数（如0.05代表5%）
@@ -1814,28 +1883,9 @@ class MonitorService:
         too_old = age_hours > 12
 
         if not (too_low_fdv or too_low_lp or too_old):
-            # 条件正常，重置连续失败计数
+            # 条件正常，重置计数
             token.exit_check_fail_count = 0
             return
-
-        # AGE 超龄直接移除，不需要连续2次
-        if too_old:
-            pass  # 直接进入移除逻辑
-        else:
-            # FDV/LP 低于阈值：需要连续2次确认，避免 API 抖动误移除
-            token.exit_check_fail_count += 1
-            if token.exit_check_fail_count < 2:
-                self.logs.append(SignalLog(
-                    ts=datetime.now(timezone.utc),
-                    symbol=token.symbol,
-                    address=token.address,
-                    strategy=StrategyName.SELL_ONLY,
-                    signal=Signal.HOLD,
-                    reason=f"白名单退出预警（第{token.exit_check_fail_count}次）：FDV低={too_low_fdv}({token.fdv}) LP低={too_low_lp}({token.liquidity})，等待下次确认",
-                ))
-                self.logs = self.logs[-500:]
-                self.save_state()
-                return
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
             if token.price and token.price > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
@@ -1959,6 +2009,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "last_rsi": f"{t.last_rsi:.1f}" if t.last_rsi is not None else "N/A",
                 "source": t.add_source,
                 "tax": f"买{(t.buy_tax or 0)*100:.1f}%/卖{(t.sell_tax or 0)*100:.1f}%" if (t.buy_tax is not None or t.sell_tax is not None) else "N/A",
+                "lp_locked": f"{t.lp_locked_pct*100:.1f}%" if t.lp_locked_pct is not None else "未检测",
             }
         )
     logs = [
