@@ -110,6 +110,8 @@ class TokenRecord:
     last_sell_at: datetime | None = None  # 卖出后冷静期：20分钟内禁止开单
     add_source: str = "manual"  # 加入来源：manual/webhook/auto_scan
     exit_check_fail_count: int = 0  # 连续低于退出阈值的次数，需连续2次才真正移除
+    buy_tax: float | None = None   # 买入税率
+    sell_tax: float | None = None  # 卖出税率
 
 
 @dataclass
@@ -224,6 +226,12 @@ class BirdeyeClient:
                 or overview_data.get("marketCap")
             )
             created_at = overview_data.get("createdAt") or overview_data.get("created_at") or overview_data.get("pairCreatedAt")
+            buy_tax = self._to_float(
+                overview_data.get("buy_tax") or overview_data.get("buyTax") or overview_data.get("buy_fee")
+            )
+            sell_tax = self._to_float(
+                overview_data.get("sell_tax") or overview_data.get("sellTax") or overview_data.get("sell_fee")
+            )
             liquidity = self._to_float(
                 overview_data.get("liquidity")
                 or overview_data.get("liquidityUsd")
@@ -234,8 +242,77 @@ class BirdeyeClient:
             "fdv": float(fdv or 0),
             "price": float(price or 0),
             "liquidity": float(liquidity or 0),
+            "buy_tax": buy_tax,
+            "sell_tax": sell_tax,
             "pool_created_at": created_at,
             "created_at": created_at,
+        }
+
+    async def fetch_rugcheck_tax(self, token: str) -> dict[str, Any]:
+        """
+        从 RugCheck API 获取代币税率信息。
+        无需 API Key，免费调用。
+        返回：{buy_tax, sell_tax, score, rugged, risks}
+        """
+        url = f"https://api.rugcheck.xyz/v1/tokens/{token}/report"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    return {}
+                payload = resp.json()
+        except Exception:
+            return {}
+
+        buy_tax: float | None = None
+        sell_tax: float | None = None
+
+        # 方式1：transferFee 字段（新版 RugCheck）
+        transfer_fee = payload.get("transferFee") or {}
+        if isinstance(transfer_fee, dict):
+            fee_pct = self._to_float(transfer_fee.get("pct") or transfer_fee.get("percent") or transfer_fee.get("rate"))
+            if fee_pct is not None:
+                # RugCheck 的 transferFee 是买卖都收的统一费率
+                if fee_pct > 1:
+                    fee_pct = fee_pct / 100  # 百分比转小数
+                buy_tax = fee_pct
+                sell_tax = fee_pct
+
+        # 方式2：从 risks 列表里找税率关键词
+        if buy_tax is None:
+            risks = payload.get("risks") or []
+            for risk in risks:
+                if not isinstance(risk, dict):
+                    continue
+                name = str(risk.get("name") or "").lower()
+                desc = str(risk.get("description") or "").lower()
+                value = str(risk.get("value") or "")
+                if "tax" in name or "fee" in name or "tax" in desc or "transfer fee" in desc:
+                    extracted = self._to_float(value.replace("%", "").strip())
+                    if extracted is not None:
+                        if extracted > 1:
+                            extracted = extracted / 100
+                        buy_tax = extracted
+                        sell_tax = extracted
+                        break
+
+        # 方式3：token_extensions 里的 transferFeeConfig
+        token_extensions = payload.get("token_extensions") or {}
+        if buy_tax is None and isinstance(token_extensions, dict):
+            tfc = token_extensions.get("transferFeeConfig") or {}
+            if isinstance(tfc, dict):
+                basis_points = self._to_float(tfc.get("newerTransferFee", {}).get("transferFeeBasisPoints") or
+                                               tfc.get("olderTransferFee", {}).get("transferFeeBasisPoints"))
+                if basis_points is not None:
+                    buy_tax = basis_points / 10000  # basis points 转小数
+                    sell_tax = basis_points / 10000
+
+        return {
+            "buy_tax": buy_tax,
+            "sell_tax": sell_tax,
+            "score": payload.get("score"),
+            "rugged": payload.get("rugged", False),
+            "risks": [r.get("name") for r in (payload.get("risks") or []) if isinstance(r, dict)],
         }
 
     async def fetch_trending(self, network: str = "solana", limit: int = 20) -> list[dict[str, Any]]:
@@ -1103,6 +1180,8 @@ class MonitorService:
             "last_sell_at": self._dt_to_str(token.last_sell_at),
             "add_source": token.add_source,
             "exit_check_fail_count": token.exit_check_fail_count,
+            "buy_tax": token.buy_tax,
+            "sell_tax": token.sell_tax,
         }
 
     def _log_to_dict(self, log: SignalLog) -> dict[str, Any]:
@@ -1146,6 +1225,8 @@ class MonitorService:
             last_sell_at=parse_cg_datetime(payload.get("last_sell_at")),
             add_source=str(payload.get("add_source", "manual")),
             exit_check_fail_count=int(payload.get("exit_check_fail_count", 0)),
+            buy_tax=payload.get("buy_tax"),
+            sell_tax=payload.get("sell_tax"),
         )
 
     async def auto_scan_trending(self) -> None:
@@ -1334,6 +1415,33 @@ class MonitorService:
             token.fdv = meta["fdv"]
             token.price = meta["price"]
             token.liquidity = meta.get("liquidity")
+            token.buy_tax = meta.get("buy_tax")
+            token.sell_tax = meta.get("sell_tax")
+
+            # 如果 Birdeye 没有返回税率，用 RugCheck 补充（仅在首次加入或税率未知时查询）
+            if token.buy_tax is None and token.sell_tax is None:
+                try:
+                    rc = await self.market_data.fetch_rugcheck_tax(token.address)
+                    if rc.get("buy_tax") is not None:
+                        token.buy_tax = rc["buy_tax"]
+                    if rc.get("sell_tax") is not None:
+                        token.sell_tax = rc["sell_tax"]
+                    # 如果 RugCheck 标记为已 rug，直接移除
+                    if rc.get("rugged"):
+                        self.logs.append(SignalLog(
+                            ts=datetime.now(timezone.utc),
+                            symbol=token.symbol, address=token.address,
+                            strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                            reason=f"RugCheck标记为已Rug，移除白名单",
+                        ))
+                        self.logs = self.logs[-500:]
+                        async with self.lock:
+                            self.tokens.pop(token.address, None)
+                            self.blacklist.add(token.address)
+                        self.save_state()
+                        return
+                except Exception:
+                    pass
             pool_created = meta.get("pool_created_at")
             parsed_pool_created = parse_cg_datetime(pool_created)
             if parsed_pool_created:
@@ -1475,6 +1583,39 @@ class MonitorService:
             await self._process_token(token)
 
     async def _handle_whitelist_exit(self, token: TokenRecord) -> None:
+        # 税率过高直接移除（买卖税率任一超过1.2%）
+        # 税率为 None 说明 API 未返回，不触发退出
+        max_tax = 0.012  # 1.2%
+        buy_tax_val = token.buy_tax if token.buy_tax is not None else 0.0
+        sell_tax_val = token.sell_tax if token.sell_tax is not None else 0.0
+        # Birdeye 有时返回百分比值（如5.0代表5%），有时返回小数（如0.05代表5%）
+        # 统一处理：如果值>1说明是百分比格式，除以100转换
+        if buy_tax_val > 1:
+            buy_tax_val = buy_tax_val / 100
+        if sell_tax_val > 1:
+            sell_tax_val = sell_tax_val / 100
+        too_high_tax = (
+            token.buy_tax is not None and buy_tax_val > max_tax
+        ) or (
+            token.sell_tax is not None and sell_tax_val > max_tax
+        )
+        if too_high_tax:
+            self.logs.append(SignalLog(
+                ts=datetime.now(timezone.utc),
+                symbol=token.symbol,
+                address=token.address,
+                strategy=StrategyName.SELL_ONLY,
+                signal=Signal.SELL if (token.rebound_entry_price or token.startup_entry_price) else Signal.HOLD,
+                reason=f"税率过高移除：买入税={buy_tax_val*100:.2f}% 卖出税={sell_tax_val*100:.2f}%，超过1.2%上限",
+            ))
+            self.logs = self.logs[-500:]
+            if token.rebound_entry_price is not None or token.startup_entry_price is not None:
+                await self.dispatcher.send(token, Signal.SELL, "税率过高，强制平仓")
+            self.tokens.pop(token.address, None)
+            self.blacklist.add(token.address)
+            self.save_state()
+            return
+
         # FDV=0 或 liquidity=0 说明 API 返回异常数据，不触发退出
         # 只有明确有值且低于阈值才计入
         fdv_valid = token.fdv is not None and token.fdv > 0
@@ -1630,6 +1771,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                 "total_pnl": total_pnl_text,
                 "last_rsi": f"{t.last_rsi:.1f}" if t.last_rsi is not None else "N/A",
                 "source": t.add_source,
+                "tax": f"买{(t.buy_tax or 0)*100:.1f}%/卖{(t.sell_tax or 0)*100:.1f}%" if (t.buy_tax is not None or t.sell_tax is not None) else "N/A",
             }
         )
     logs = [
