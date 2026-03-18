@@ -842,6 +842,8 @@ class StrategyEngine:
         token_age_hours: float | None = None,
         ema9_1m_prev: float | None = None,
         ema20_1m_prev: float | None = None,
+        ema9_vals_full: list[float] | None = None,
+        ema20_vals_full: list[float] | None = None,
     ) -> tuple[StrategyName, Signal, str]:
         # FIX #2: 用 closes_1m[-2] 作为已确认收盘价，排除活K干扰
         close_1m = closes_1m[-2] if len(closes_1m) >= 2 else closes_1m[-1]
@@ -886,8 +888,21 @@ class StrategyEngine:
                 ema_gap_prev = abs(ema9_1m_prev - ema20_1m_prev) / ema20_1m_prev
                 if ema_gap_now > 0.15:
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距过大({ema_gap_now*100:.1f}%)，趋势过强不开单"
-                if ema_gap_now >= ema_gap_prev:  # 必须收窄，不允许平稳或扩大
-                    return StrategyName.REBOUND, Signal.HOLD, f"EMA间距未收窄({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
+                # 比较前3根均值，排除单根抖动误判
+                if (
+                    ema9_vals_full is not None and ema20_vals_full is not None
+                    and len(ema9_vals_full) >= 4 and len(ema20_vals_full) >= 4
+                ):
+                    valid = [
+                        abs(ema9_vals_full[j] - ema20_vals_full[j]) / ema20_vals_full[j]
+                        for j in range(-4, -1)
+                        if ema20_vals_full[j] > 0
+                    ]
+                    ema_gap_avg3 = sum(valid) / len(valid) if valid else ema_gap_prev
+                else:
+                    ema_gap_avg3 = ema_gap_prev
+                if ema_gap_now >= ema_gap_avg3:
+                    return StrategyName.REBOUND, Signal.HOLD, f"EMA间距未收窄(前3根均值{ema_gap_avg3*100:.1f}%→当前{ema_gap_now*100:.1f}%)，趋势未减弱"
 
             # 实盘过滤3：跌幅门槛 + 结构判断
             # 用近60根K线的价格区间判断震荡/趋势结构
@@ -1788,6 +1803,8 @@ class MonitorService:
                 token_age_hours,
                 ema9_prev_1m,
                 ema20_prev_1m,
+                ema9_vals,
+                ema20_vals,
             )
 
             # 记录当前 RSI 到 token（用于 dashboard 展示）
