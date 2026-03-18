@@ -917,7 +917,7 @@ class StrategyEngine:
                 if not (no_new_low or big_bullish):
                     return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳：最近3根创新低且无大阳线({last_candle_gain*100:.1f}%<2%)"
 
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+跌幅足+价格企稳"
+            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+价格企稳"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -1185,7 +1185,7 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                     vol_not_expanding = recent_vol3 <= prev_vol5 * 1.2
                     vol_ok = had_vol_drop or vol_not_expanding
 
-                    # --- 条件4：价格企稳 = 不创新低 + 买点附近量能萎缩 ---
+                    # --- 条件4：价格企稳（不创新低 或 大阳线止跌，对齐实盘）---
                     stab = config.filter3_stability_bars
                     if i >= stab + 1:
                         stab_lows = lows[i - stab:i]
@@ -1193,29 +1193,28 @@ def run_rebound_backtest_24h(ohlcv: list[list[float]], config: BacktestConfig, n
                         no_new_low = all(l >= prev_low * 0.995 for l in stab_lows)
                     else:
                         no_new_low = False
-
-                    # 量能萎缩：买点前3根均量 < 前5~10根均量的70%
-                    # 说明卖压在减弱，不是放量下跌中途
-                    if i >= 10:
-                        buy_vol3 = sum(vols[i - 3:i]) / 3
-                        ref_vol7 = sum(vols[i - 10:i - 3]) / 7
-                        vol_shrink_ok = (ref_vol7 <= 0) or (buy_vol3 <= ref_vol7 * 0.7)
+                    # 大阳线例外：最近1根涨幅>2%直接放行
+                    if i >= 2 and closes[i - 2] > 0:
+                        big_bullish = (closes[i - 1] - closes[i - 2]) / closes[i - 2] > 0.02
                     else:
-                        vol_shrink_ok = True  # 数据不足时不强制
-
-                    price_stable = no_new_low and vol_shrink_ok
+                        big_bullish = False
+                    price_stable = no_new_low or big_bullish
 
                     # --- 两次买入最小间隔（过滤RSI钝化连发）---
                     interval_ok = (last_buy_bar < 0) or (i - last_buy_bar >= config.filter3_min_interval)
 
-                    # --- EMA间距过滤 ---
-                    if ema20_now > 0 and i >= 5:
+                    # --- EMA间距过滤（前3根均值，对齐实盘）---
+                    if ema20_now > 0 and i >= 4:
                         ema_gap_now_pct = abs(ema9_now - ema20_now) / ema20_now
-                        ema20_prev5 = ema20_vals[i - 5]
-                        ema9_prev5 = ema9_vals[i - 5]
-                        ema_gap_prev_pct = abs(ema9_prev5 - ema20_prev5) / ema20_prev5 if ema20_prev5 > 0 else ema_gap_now_pct
+                        # 前3根均值
+                        avg3_gaps = [
+                            abs(ema9_vals[j] - ema20_vals[j]) / ema20_vals[j]
+                            for j in range(i - 3, i)
+                            if ema20_vals[j] > 0
+                        ]
+                        ema_gap_avg3 = sum(avg3_gaps) / len(avg3_gaps) if avg3_gaps else ema_gap_now_pct
                         gap_ok = ema_gap_now_pct <= config.filter3_ema_gap_max
-                        gap_narrowing = (not config.filter3_ema_gap_narrowing) or (ema_gap_now_pct < ema_gap_prev_pct)
+                        gap_narrowing = (not config.filter3_ema_gap_narrowing) or (ema_gap_now_pct < ema_gap_avg3)
                         ema_gap_ok = gap_ok and gap_narrowing
                     else:
                         ema_gap_ok = True
