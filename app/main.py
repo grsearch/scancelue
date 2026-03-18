@@ -875,6 +875,9 @@ class StrategyEngine:
                 return StrategyName.REBOUND, Signal.SELL, f"止损：跌破首仓价{entry:.4f}的90%"
 
         if not has_rebound and cross_up(rsi1_prev, rsi1_now, 30):
+            # 防御 Birdeye 数据跳跃：RSI 单次跳超20点视为异常，忽略
+            if rsi1_now - rsi1_prev > 20:
+                return StrategyName.REBOUND, Signal.HOLD, f"RSI跳跃异常({rsi1_prev:.1f}→{rsi1_now:.1f})，疑似Birdeye数据跳跃，忽略信号"
             now_utc = datetime.now(timezone.utc)
 
             # 实盘过滤1：卖出后20分钟冷静期，禁止开单
