@@ -974,51 +974,54 @@ BACKTEST_CONFIGS = [
     ),
     BacktestConfig(
         name="反弹策略2",
+        # 对齐实盘：EMA收窄 + 跌幅门槛 + 价格企稳 + 移动止盈12% + 止损10%
+        # 与实盘唯一差异：回测无法模拟冷静期20分钟和价格区间结构判断
         mode="rebound",
         candle_minutes=1,
         require_open_gate=False,
         buy_rsi_threshold=30.0,
         enable_add=False,
         stop_loss_pct=0.90,
-        sell_cross_65=True,
-        sell_cross_70=True,
-        sell_cross_75=True,
+        sell_cross_65=False,            # 实盘已移除RSI下穿卖出
+        sell_cross_70=False,
+        sell_cross_75=False,
         overbought_rsi=85.0,
-        # 与实盘策略保持一致：EMA间距过滤 + 量能萎缩 + 价格企稳
         use_filter3=True,
-        filter3_min_drop_ranging=0.0,   # 跌幅不限制（与实盘一致）
-        filter3_min_drop_trending=0.0,
+        filter3_min_drop_ranging=0.15,  # 对齐实盘震荡结构门槛
+        filter3_min_drop_trending=0.30, # 对齐实盘趋势结构门槛
         filter3_lookback_high=60,
         filter3_stability_bars=3,       # 价格企稳：最近3根不创新低
-        filter3_vol_ratio=1.5,          # 量能萎缩：买点前3根 < 参考均量70%
+        filter3_vol_ratio=999.0,        # 量能不限制（实盘已移除此条件）
         filter3_min_interval=20,        # 两次买入间隔≥20根K线
-        filter3_rsi_strength=0.0,       # RSI强度不限制
+        filter3_rsi_strength=0.0,
         filter3_ema_gap_max=0.15,       # EMA间距≤15%
         filter3_ema_gap_narrowing=True, # EMA间距必须收窄
+        trailing_stop_pct=0.12,         # 对齐实盘移动止盈12%
     ),
     BacktestConfig(
         name="反弹策略3",
+        # 对齐实盘但保留RSI下穿卖出，用于对比移动止盈效果
         mode="rebound",
         candle_minutes=1,
         require_open_gate=False,
         buy_rsi_threshold=30.0,
         enable_add=False,
         stop_loss_pct=0.90,
-        sell_cross_65=True,
+        sell_cross_65=True,             # 保留RSI下穿，用于对比
         sell_cross_70=True,
         sell_cross_75=True,
         overbought_rsi=85.0,
         use_filter3=True,
-        filter3_min_drop_ranging=0.20,
+        filter3_min_drop_ranging=0.15,  # 对齐实盘
         filter3_min_drop_trending=0.30,
         filter3_lookback_high=60,
         filter3_stability_bars=3,
-        filter3_vol_ratio=1.5,
+        filter3_vol_ratio=999.0,        # 量能不限制
         filter3_min_interval=20,
-        filter3_rsi_strength=60.0,
+        filter3_rsi_strength=0.0,
         filter3_ema_gap_max=0.15,
         filter3_ema_gap_narrowing=True,
-        trailing_stop_pct=0.08,  # 移动止盈：从最高点回撤8%卖出
+        trailing_stop_pct=0.12,         # 对齐实盘移动止盈12%
     ),
 ]
 
