@@ -886,18 +886,24 @@ class StrategyEngine:
                 if ema_gap_now >= ema_gap_prev + 0.01:  # 允许1%抖动
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距扩大中({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
 
-            # 实盘过滤3：跌幅门槛（动态回看窗口，避免老币/新币不公平）
-            # 回看窗口：取 min(实际K线数, 120) 根，最少30根
-            # 这样新币用更短窗口，老币用更长窗口，对齐真实跌幅
-            lookback = max(60, min(120, len(closes_1m) - 1))
-            if len(closes_1m) > lookback:
+            # 实盘过滤3：跌幅门槛 + 结构判断
+            # 用近60根K线的价格区间判断震荡/趋势结构
+            lookback = min(60, len(closes_1m) - 1)
+            if lookback >= 30:
                 lookback_closes = closes_1m[-lookback-1:-1]  # 排除活K
                 recent_high = max(lookback_closes)
+                recent_low = min(lookback_closes)
                 drop_pct = (recent_high - close_1m) / recent_high if recent_high > 0 else 0.0
-                ema_gap = abs(ema9_1m - ema20_1m) / ema20_1m if ema20_1m > 0 else 0.1
-                min_drop = 0.15 if ema_gap < 0.05 else 0.30
+                range_pct = (recent_high - recent_low) / recent_low if recent_low > 0 else 0.0
+                # 当前价在区间的位置（0=最低点，1=最高点）
+                position = (close_1m - recent_low) / (recent_high - recent_low) if recent_high > recent_low else 0.5
+                # 区间>=30% 且当前价在区间下半段 = 震荡结构，门槛15%
+                # 否则 = 趋势结构，门槛30%
+                is_ranging = range_pct >= 0.30 and position < 0.50
+                min_drop = 0.15 if is_ranging else 0.30
+                structure = "震荡" if is_ranging else "趋势"
                 if drop_pct < min_drop:
-                    return StrategyName.REBOUND, Signal.HOLD, f"跌幅不足({drop_pct*100:.1f}% < {min_drop*100:.0f}%，回看{lookback}根)"
+                    return StrategyName.REBOUND, Signal.HOLD, f"跌幅不足({drop_pct*100:.1f}% < {min_drop*100:.0f}%，{structure}结构，区间{range_pct*100:.1f}%，位置{position*100:.1f}%)"
 
             # 实盘过滤5：价格企稳（最近3根K线不创新低）
             if len(closes_1m) >= 5:
