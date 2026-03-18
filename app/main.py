@@ -858,11 +858,12 @@ class StrategyEngine:
             if rsi1_now >= 85:
                 return StrategyName.REBOUND, Signal.SELL, f"反弹策略卖出：RSI超买({rsi1_now:.1f}>=85)"
 
-            # 卖出条件2：移动止盈 - 从最高点回撤8%
-            trailing_stop = peak * 0.92
-            if close_1m <= trailing_stop:
+            # 卖出条件2：移动止盈 - 从最高点回撤12%
+            # RSI < 35 时暂停移动止盈（超卖区反弹刚开始，给更多空间）
+            trailing_stop = peak * 0.88
+            if close_1m <= trailing_stop and rsi1_now > 35:
                 gain_pct = (peak / entry - 1.0) * 100 if entry and entry > 0 else 0.0
-                return StrategyName.REBOUND, Signal.SELL, f"移动止盈：最高{peak:.4f}回撤8%至{trailing_stop:.4f}，峰值收益{gain_pct:.1f}%"
+                return StrategyName.REBOUND, Signal.SELL, f"移动止盈：最高{peak:.4f}回撤12%至{trailing_stop:.4f}，峰值收益{gain_pct:.1f}%"
 
             # 卖出条件3：跌破首仓止损线（-10%）
             if entry is not None and close_1m <= entry * 0.90:
@@ -883,8 +884,8 @@ class StrategyEngine:
                 ema_gap_prev = abs(ema9_1m_prev - ema20_1m_prev) / ema20_1m_prev
                 if ema_gap_now > 0.15:
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距过大({ema_gap_now*100:.1f}%)，趋势过强不开单"
-                if ema_gap_now >= ema_gap_prev + 0.01:  # 允许1%抖动
-                    return StrategyName.REBOUND, Signal.HOLD, f"EMA间距扩大中({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
+                if ema_gap_now >= ema_gap_prev:  # 必须收窄，不允许平稳或扩大
+                    return StrategyName.REBOUND, Signal.HOLD, f"EMA间距未收窄({ema_gap_prev*100:.1f}%→{ema_gap_now*100:.1f}%)，趋势未减弱"
 
             # 实盘过滤3：跌幅门槛 + 结构判断
             # 用近60根K线的价格区间判断震荡/趋势结构
