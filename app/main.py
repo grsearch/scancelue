@@ -917,7 +917,7 @@ class StrategyEngine:
                 if not (no_new_low or big_bullish):
                     return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳：最近3根创新低且无大阳线({last_candle_gain*100:.1f}%<2%)"
 
-            return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+价格企稳"
+            return StrategyName.REBOUND, Signal.BUY, f"反弹策略买入：RSI上穿30({rsi1_prev:.1f}→{rsi1_now:.1f})+EMA收窄+价格企稳"
 
         return StrategyName.REBOUND, Signal.HOLD, "无买卖信号"
 
@@ -1735,6 +1735,33 @@ class MonitorService:
             volumes = [float(row[5]) for row in ohlcv if len(row) >= 6]
             # 至少需要 20 根已确认K线（排除活K后还有足够数据）
             if len(closes) < 20:
+                # K线数据不足：如果有持仓，检查是否需要止损
+                has_pos = token.rebound_entry_price is not None or token.startup_entry_price is not None
+                if has_pos and token.price and token.price > 0:
+                    entry = token.rebound_entry_price or token.startup_entry_price
+                    if entry and token.price <= entry * 0.90:
+                        self.logs.append(SignalLog(
+                            ts=datetime.now(timezone.utc),
+                            symbol=token.symbol, address=token.address,
+                            strategy=StrategyName.SELL_ONLY, signal=Signal.SELL,
+                            reason=f"K线数据为空，价格跌破止损线，强制平仓（入场{entry:.6f} 当前{token.price:.6f}）",
+                        ))
+                        self.logs = self.logs[-500:]
+                        await self.dispatcher.send(token, Signal.SELL, "K线为空止损")
+                        token.rebound_entry_price = None
+                        token.rebound_peak_price = None
+                        token.startup_entry_price = None
+                        token.position = PositionState()
+                        token.last_sell_at = datetime.now(timezone.utc)
+                        self.save_state()
+                    else:
+                        self.logs.append(SignalLog(
+                            ts=datetime.now(timezone.utc),
+                            symbol=token.symbol, address=token.address,
+                            strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                            reason=f"K线数据为空，持仓中等待数据恢复（入场{entry:.6f} 当前{token.price:.6f}）",
+                        ))
+                        self.logs = self.logs[-500:]
                 return
             ema9_vals = ema(closes, 9)
             ema20_vals = ema(closes, 20)
