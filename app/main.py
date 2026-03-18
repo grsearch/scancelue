@@ -908,13 +908,16 @@ class StrategyEngine:
                 if drop_pct < min_drop:
                     return StrategyName.REBOUND, Signal.HOLD, f"跌幅不足({drop_pct*100:.1f}% < {min_drop*100:.0f}%，{structure}结构，区间{range_pct*100:.1f}%，位置{position*100:.1f}%)"
 
-            # 实盘过滤5：价格企稳（最近3根K线不创新低）
+            # 实盘过滤4：价格企稳（最近3根不创新低，或出现大阳线止跌）
             if len(closes_1m) >= 5:
-                stab_lows = [closes_1m[i] for i in range(-4, -1)]  # 排除活K取前3根
+                stab_lows = [closes_1m[i] for i in range(-4, -1)]
                 prev_low = closes_1m[-5]
                 no_new_low = all(l >= prev_low * 0.995 for l in stab_lows)
-                if not no_new_low:
-                    return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳：最近3根K线仍在创新低"
+                # 大阳线例外：最近1根涨幅>2%，说明已出现止跌信号，直接放行
+                last_candle_gain = (closes_1m[-2] - closes_1m[-3]) / closes_1m[-3] if closes_1m[-3] > 0 else 0.0
+                big_bullish = last_candle_gain > 0.02
+                if not (no_new_low or big_bullish):
+                    return StrategyName.REBOUND, Signal.HOLD, f"价格未企稳：最近3根创新低且无大阳线({last_candle_gain*100:.1f}%<2%)"
 
             return StrategyName.REBOUND, Signal.BUY, "反弹策略买入：RSI上穿30+EMA收窄+跌幅足+价格企稳"
 
