@@ -114,6 +114,8 @@ class TokenRecord:
     sell_tax: float | None = None  # 卖出税率
     rebound_peak_price: float | None = None  # 持仓后最高价，用于移动止盈
     rugcheck_checked: bool = False  # 是否已做过 RugCheck 检测（只检测一次）
+    rugcheck_retry_count: int = 0  # RugCheck 重试次数，超过3次放弃
+    jupiter_checked: bool = False  # 是否已做过 Jupiter 税率检测（只检测一次）
     lp_locked_pct: float | None = None  # LP 锁定比例
 
 
@@ -1359,6 +1361,8 @@ class MonitorService:
             "sell_tax": token.sell_tax,
             "rebound_peak_price": token.rebound_peak_price,
             "rugcheck_checked": token.rugcheck_checked,
+            "rugcheck_retry_count": token.rugcheck_retry_count,
+            "jupiter_checked": token.jupiter_checked,
             "lp_locked_pct": token.lp_locked_pct,
         }
 
@@ -1407,6 +1411,8 @@ class MonitorService:
             sell_tax=payload.get("sell_tax"),
             rebound_peak_price=payload.get("rebound_peak_price"),
             rugcheck_checked=bool(payload.get("rugcheck_checked", False)),
+            rugcheck_retry_count=int(payload.get("rugcheck_retry_count", 0)),
+            jupiter_checked=bool(payload.get("jupiter_checked", False)),
             lp_locked_pct=payload.get("lp_locked_pct"),
         )
 
@@ -1543,6 +1549,44 @@ class MonitorService:
         self.blacklist = set(str(x) for x in payload.get("blacklist", []))
         self.logs = logs[-500:]
 
+    async def _check_token_tax(self, token: TokenRecord) -> None:
+        """收录代币时在后台做一次税率检测，之后不再重复。"""
+        if token.jupiter_checked:
+            return
+        try:
+            jupiter_key = os.getenv("JUPITER_API_KEY", "").strip()
+            if jupiter_key:
+                samples = []
+                for _ in range(3):
+                    jup = await self.market_data.fetch_jupiter_tax(token.address)
+                    if "error" not in jup and jup.get("total_tax") is not None:
+                        samples.append(jup["total_tax"])
+                    await asyncio.sleep(0.5)
+                if samples:
+                    avg_total_tax = sum(samples) / len(samples)
+                    token.buy_tax = round(avg_total_tax / 2, 4)
+                    token.sell_tax = round(avg_total_tax / 2, 4)
+                    token.jupiter_checked = True
+                    self.logs.append(SignalLog(
+                        ts=datetime.now(timezone.utc),
+                        symbol=token.symbol, address=token.address,
+                        strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                        reason=f"[收录时]Jupiter税率检测({len(samples)}次均值)：买入税={token.buy_tax*100:.2f}% 卖出税={token.sell_tax*100:.2f}% 样本={[round(x*100,2) for x in samples]}",
+                    ))
+                    self.logs = self.logs[-500:]
+                    self.save_state()
+                    return
+            # 无Jupiter Key 或 Jupiter失败，用RugCheck
+            rc = await self.market_data.fetch_rugcheck_tax(token.address)
+            if rc.get("buy_tax") is not None:
+                token.buy_tax = rc["buy_tax"]
+                token.jupiter_checked = True
+            if rc.get("sell_tax") is not None:
+                token.sell_tax = rc["sell_tax"]
+            self.save_state()
+        except Exception:
+            pass  # 失败不标记，下次 add_token 时重试
+
     async def add_token(self, req: AddTokenRequest, source: str = "manual") -> TokenRecord:
         """统一入口：手动/webhook/auto_scan 三种方式均走此方法，自动去重。"""
         if req.network.lower() != "solana":
@@ -1563,6 +1607,8 @@ class MonitorService:
             self.tokens[req.address] = token
             self.save_state()
             await self.notify_realtime_event(req.address)
+            # 收录时立即在后台做一次税率检测，不阻塞主流程
+            asyncio.create_task(self._check_token_tax(token))
             return token
 
     async def get_token_addresses(self) -> list[str]:
@@ -1596,57 +1642,16 @@ class MonitorService:
             token.fdv = meta["fdv"]
             token.price = meta["price"]
             token.liquidity = meta.get("liquidity")
-            token.buy_tax = meta.get("buy_tax")
-            token.sell_tax = meta.get("sell_tax")
+            # 只在首次（未做过Jupiter检测）时用Birdeye的税率，避免覆盖已缓存的检测结果
+            if not token.jupiter_checked:
+                token.buy_tax = meta.get("buy_tax")
+                token.sell_tax = meta.get("sell_tax")
 
-            # 税率检测优先级：Jupiter模拟 > Birdeye > RugCheck
-            # 仅在首次（税率未知）时查询，避免每次都调用
-            if token.buy_tax is None and token.sell_tax is None:
-                # 优先用 Jupiter 模拟（最准确，直接检测合约 transfer tax）
-                jupiter_key = os.getenv("JUPITER_API_KEY", "").strip()
-                if jupiter_key:
-                    try:
-                        # 取3次均值，减少波动影响
-                        samples = []
-                        for _ in range(3):
-                            jup = await self.market_data.fetch_jupiter_tax(token.address)
-                            if "error" not in jup and jup.get("total_tax") is not None:
-                                samples.append(jup["total_tax"])
-                            await asyncio.sleep(0.5)  # 间隔0.5秒避免频率限制
+            # 税率检测在收录时已通过 _check_token_tax 完成，此处无需重复检测
 
-                        if samples:
-                            avg_total_tax = sum(samples) / len(samples)
-                            token.buy_tax = round(avg_total_tax / 2, 4)
-                            token.sell_tax = round(avg_total_tax / 2, 4)
-                            self.logs.append(SignalLog(
-                                ts=datetime.now(timezone.utc),
-                                symbol=token.symbol, address=token.address,
-                                strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
-                                reason=f"Jupiter税率检测({len(samples)}次均值)：买入税={token.buy_tax*100:.2f}% 卖出税={token.sell_tax*100:.2f}% 样本={[round(x*100,2) for x in samples]}",
-                            ))
-                            self.logs = self.logs[-500:]
-                        else:
-                            # Jupiter 全部失败，降级用 RugCheck
-                            rc = await self.market_data.fetch_rugcheck_tax(token.address)
-                            if rc.get("buy_tax") is not None:
-                                token.buy_tax = rc["buy_tax"]
-                            if rc.get("sell_tax") is not None:
-                                token.sell_tax = rc["sell_tax"]
-                    except Exception:
-                        pass
-                else:
-                    # 没有 Jupiter Key，用 RugCheck 补充税率
-                    try:
-                        rc = await self.market_data.fetch_rugcheck_tax(token.address)
-                        if rc.get("buy_tax") is not None:
-                            token.buy_tax = rc["buy_tax"]
-                        if rc.get("sell_tax") is not None:
-                            token.sell_tax = rc["sell_tax"]
-                    except Exception:
-                        pass
-
-                # RugCheck 首次检测：rugged + LP Locked（只调用一次，避免频率限制）
-                if not token.rugcheck_checked:
+                # RugCheck 首次检测：rugged + LP Locked
+                # 最多重试3次，超过3次放弃（免费API有频率限制）
+                if not token.rugcheck_checked and token.rugcheck_retry_count < 3:
                     try:
                         rc_check = await self.market_data.fetch_rugcheck_tax(token.address)
                         token.rugcheck_checked = True
@@ -1690,13 +1695,22 @@ class MonitorService:
                             ts=datetime.now(timezone.utc),
                             symbol=token.symbol, address=token.address,
                             strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
-                            reason=f"RugCheck首次检测完成：LP锁定={lp_locked*100:.2f}% rugged=False" if lp_locked is not None else "RugCheck首次检测完成：LP锁定数据不可用",
+                            reason=f"RugCheck检测完成：LP锁定={lp_locked*100:.2f}% rugged=False" if lp_locked is not None else "RugCheck检测完成：LP锁定数据不可用",
                         ))
                         self.logs = self.logs[-500:]
                         self.save_state()
-                    except Exception as exc:
-                        # 失败不标记 checked，下次继续尝试
-                        token.rugcheck_checked = False
+                    except Exception:
+                        # 失败计数+1，超过3次不再重试
+                        token.rugcheck_retry_count += 1
+                        if token.rugcheck_retry_count >= 3:
+                            token.rugcheck_checked = True  # 放弃检测，不再重试
+                            self.logs.append(SignalLog(
+                                ts=datetime.now(timezone.utc),
+                                symbol=token.symbol, address=token.address,
+                                strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
+                                reason=f"RugCheck检测失败{token.rugcheck_retry_count}次，放弃检测（免费API限制）",
+                            ))
+                            self.logs = self.logs[-500:]
             pool_created = meta.get("pool_created_at")
             parsed_pool_created = parse_cg_datetime(pool_created)
             if parsed_pool_created:
