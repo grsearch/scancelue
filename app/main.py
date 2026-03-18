@@ -110,6 +110,7 @@ class TokenRecord:
     last_sell_at: datetime | None = None  # 卖出后冷静期：20分钟内禁止开单
     add_source: str = "manual"  # 加入来源：manual/webhook/auto_scan
     exit_check_fail_count: int = 0  # 连续低于退出阈值的次数，需连续2次才真正移除
+    exit_check_fail_at: datetime | None = None  # 第一次检测失败的时间
     buy_tax: float | None = None   # 买入税率
     sell_tax: float | None = None  # 卖出税率
     rebound_peak_price: float | None = None  # 持仓后最高价，用于移动止盈
@@ -904,24 +905,6 @@ class StrategyEngine:
                 if ema_gap_now >= ema_gap_avg3:
                     return StrategyName.REBOUND, Signal.HOLD, f"EMA间距未收窄(前3根均值{ema_gap_avg3*100:.1f}%→当前{ema_gap_now*100:.1f}%)，趋势未减弱"
 
-            # 实盘过滤3：跌幅门槛 + 结构判断
-            # 用近60根K线的价格区间判断震荡/趋势结构
-            lookback = min(60, len(closes_1m) - 1)
-            if lookback >= 30:
-                lookback_closes = closes_1m[-lookback-1:-1]  # 排除活K
-                recent_high = max(lookback_closes)
-                recent_low = min(lookback_closes)
-                drop_pct = (recent_high - close_1m) / recent_high if recent_high > 0 else 0.0
-                range_pct = (recent_high - recent_low) / recent_low if recent_low > 0 else 0.0
-                # 当前价在区间的位置（0=最低点，1=最高点）
-                position = (close_1m - recent_low) / (recent_high - recent_low) if recent_high > recent_low else 0.5
-                # 区间>=30% 且当前价在区间下半段 = 震荡结构，门槛15%
-                # 否则 = 趋势结构，门槛30%
-                is_ranging = range_pct >= 0.30 and position < 0.50
-                min_drop = 0.15 if is_ranging else 0.30
-                structure = "震荡" if is_ranging else "趋势"
-                if drop_pct < min_drop:
-                    return StrategyName.REBOUND, Signal.HOLD, f"跌幅不足({drop_pct*100:.1f}% < {min_drop*100:.0f}%，{structure}结构，区间{range_pct*100:.1f}%，位置{position*100:.1f}%)"
 
             # 实盘过滤4：价格企稳（最近3根不创新低，或出现大阳线止跌）
             if len(closes_1m) >= 5:
@@ -1378,6 +1361,7 @@ class MonitorService:
             "last_sell_at": self._dt_to_str(token.last_sell_at),
             "add_source": token.add_source,
             "exit_check_fail_count": token.exit_check_fail_count,
+            "exit_check_fail_at": self._dt_to_str(token.exit_check_fail_at),
             "buy_tax": token.buy_tax,
             "sell_tax": token.sell_tax,
             "rebound_peak_price": token.rebound_peak_price,
@@ -1428,6 +1412,7 @@ class MonitorService:
             last_sell_at=parse_cg_datetime(payload.get("last_sell_at")),
             add_source=str(payload.get("add_source", "manual")),
             exit_check_fail_count=int(payload.get("exit_check_fail_count", 0)),
+            exit_check_fail_at=parse_cg_datetime(payload.get("exit_check_fail_at")),
             buy_tax=payload.get("buy_tax"),
             sell_tax=payload.get("sell_tax"),
             rebound_peak_price=payload.get("rebound_peak_price"),
@@ -1916,10 +1901,45 @@ class MonitorService:
         lp_valid = token.liquidity is not None and token.liquidity > 0
         too_low_fdv = fdv_valid and token.fdv < 50000
         too_low_lp = lp_valid and token.liquidity < 10000
+
         if not (too_low_fdv or too_low_lp):
-            # 条件正常，重置计数
+            # 条件正常，重置连续失败计数
             token.exit_check_fail_count = 0
             return
+
+        # 连续2次检测都低于阈值且间隔>=5分钟才真正移除，防止 API 抖动误移除
+        now_utc = datetime.now(timezone.utc)
+        if token.exit_check_fail_count == 0:
+            # 第一次失败：记录时间，不移除
+            token.exit_check_fail_count = 1
+            token.exit_check_fail_at = now_utc
+            self.logs.append(SignalLog(
+                ts=now_utc,
+                symbol=token.symbol,
+                address=token.address,
+                strategy=StrategyName.SELL_ONLY,
+                signal=Signal.HOLD,
+                reason=f"退出预警第1次：FDV={token.fdv:.0f} LP={token.liquidity:.0f}，5分钟后再次确认",
+            ))
+            self.logs = self.logs[-500:]
+            self.save_state()
+            return
+        else:
+            # 第二次失败：检查距第一次是否超过5分钟
+            first_fail_mins = (now_utc - token.exit_check_fail_at).total_seconds() / 60 if token.exit_check_fail_at else 999
+            if first_fail_mins < 5:
+                self.logs.append(SignalLog(
+                    ts=now_utc,
+                    symbol=token.symbol,
+                    address=token.address,
+                    strategy=StrategyName.SELL_ONLY,
+                    signal=Signal.HOLD,
+                    reason=f"退出预警等待中（距首次{first_fail_mins:.1f}分钟 < 5分钟）：FDV={token.fdv:.0f} LP={token.liquidity:.0f}",
+                ))
+                self.logs = self.logs[-500:]
+                self.save_state()
+                return
+            # 超过5分钟仍低于阈值，确认移除
         if token.rebound_entry_price is not None or token.startup_entry_price is not None:
             await self.dispatcher.send(token, Signal.SELL, "移出白名单前先平仓")
             if token.price and token.price > 0 and token.rebound_entry_price and token.rebound_entry_price > 0:
