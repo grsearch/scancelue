@@ -2058,6 +2058,52 @@ async def add_token(req: AddTokenRequest) -> dict[str, Any]:
     }
 
 
+@app.post("/webhook/remove-token")
+async def remove_token(req: dict) -> dict[str, Any]:
+    """从白名单移除代币并加入黑名单，立即生效（不需要重启）"""
+    address = req.get("address", "").strip()
+    if not address:
+        return {"ok": False, "message": "缺少 address 参数"}
+    async with service.lock:
+        token = service.tokens.pop(address, None)
+        service.blacklist.add(address)
+    service.save_state()
+    symbol = token.symbol if token else address[:8]
+    return {"ok": True, "message": f"{symbol} 已从白名单移除并加入黑名单", "address": address}
+
+
+@app.post("/webhook/remove-token-by-symbol")
+async def remove_token_by_symbol(req: dict) -> dict[str, Any]:
+    """按 symbol 从白名单移除代币（大小写不敏感）"""
+    symbol_query = req.get("symbol", "").strip().upper()
+    if not symbol_query:
+        return {"ok": False, "message": "缺少 symbol 参数"}
+    async with service.lock:
+        to_remove = [
+            addr for addr, t in service.tokens.items()
+            if t.symbol.upper() == symbol_query
+        ]
+        for addr in to_remove:
+            service.tokens.pop(addr, None)
+            service.blacklist.add(addr)
+    service.save_state()
+    if to_remove:
+        return {"ok": True, "message": f"{symbol_query} 已移除", "addresses": to_remove}
+    return {"ok": False, "message": f"未找到 {symbol_query}"}
+
+
+@app.post("/webhook/clear-blacklist")
+async def clear_blacklist(req: dict) -> dict[str, Any]:
+    """从黑名单移除指定地址，允许重新加入白名单"""
+    address = req.get("address", "").strip()
+    if not address:
+        return {"ok": False, "message": "缺少 address 参数"}
+    async with service.lock:
+        service.blacklist.discard(address)
+    service.save_state()
+    return {"ok": True, "message": f"{address[:8]}... 已从黑名单移除"}
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     now = datetime.now(timezone.utc)
