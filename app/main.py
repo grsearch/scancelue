@@ -1433,6 +1433,7 @@ class MonitorService:
           - AGE 1小时 ~ 7天
           - 近2小时振幅 >= 30%
           - 当前价 >= 近2小时最高价 * 60%（排除已崩塌的币）
+          - RSI 近2小时内下穿30至少2次 + 上穿70至少2次（规律震荡币）
         """
         # 环境变量控制是否启用自动扫描
         if os.getenv("AUTO_SCAN_ENABLED", "1") != "1":
@@ -1480,7 +1481,7 @@ class MonitorService:
                 if age_hours < 1.0 or age_hours > 168.0:  # 168h = 7天
                     continue
 
-            # 拉取近2小时K线，计算振幅
+            # 拉取近2小时K线，计算振幅 + RSI震荡特征
             try:
                 ohlcv_2h = await self.market_data.fetch_ohlcv_2h("solana", address)
                 if len(ohlcv_2h) < 10:
@@ -1501,6 +1502,20 @@ class MonitorService:
                 if price_ratio < 0.60:
                     continue
 
+                # RSI震荡特征：近2小时内 RSI 下穿30至少2次 + 上穿70至少2次
+                closes_2h = [float(row[4]) for row in ohlcv_2h]
+                rsi_2h = rsi(closes_2h, 9)
+                cross_below_30 = sum(
+                    1 for i in range(1, len(rsi_2h))
+                    if rsi_2h[i - 1] >= 30 > rsi_2h[i]
+                )
+                cross_above_70 = sum(
+                    1 for i in range(1, len(rsi_2h))
+                    if rsi_2h[i - 1] <= 70 < rsi_2h[i]
+                )
+                if cross_below_30 < 2 or cross_above_70 < 2:
+                    continue
+
             except Exception:
                 continue
 
@@ -1514,7 +1529,7 @@ class MonitorService:
                 self.logs.append(SignalLog(
                     ts=datetime.now(timezone.utc), symbol=symbol, address=address,
                     strategy=StrategyName.SELL_ONLY, signal=Signal.HOLD,
-                    reason=f"auto_scan加入白名单：振幅{amplitude_2h*100:.1f}% 当前价/高点{price_ratio*100:.1f}% FDV={fdv:,.0f}",
+                    reason=f"auto_scan加入白名单：振幅{amplitude_2h*100:.1f}% 当前价/高点{price_ratio*100:.1f}% FDV={fdv:,.0f} RSI下穿30×{cross_below_30} 上穿70×{cross_above_70}",
                 ))
                 self.logs = self.logs[-500:]
             except Exception:
